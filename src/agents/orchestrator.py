@@ -266,14 +266,49 @@ async def run_parallel_workflow(client, query: str, timeout_sec: int = 45) -> st
         revised_json = _extract_json_dict(revised_out)
         if revised_json:
             advisor_json = revised_json
+            recheck_prompt = (
+                "Audit candidate output against evidence and return strict JSON validation payload.\n\n"
+                f"User request:\n{query}\n\n"
+                f"Evidence (Architect):\n{_clip(architect_out)}\n\n"
+                f"Evidence (Quant):\n{_clip(quant_out)}\n\n"
+                f"Candidate output:\n{json.dumps(revised_json)}"
+            )
+            recheck_out = await asyncio.wait_for(run_query(critic, recheck_prompt), timeout=min(timeout_sec, 20))
+            critic_json = _extract_json_dict(recheck_out) or critic_json
         else:
             advisor_out = revised_out
 
     if advisor_json:
+        critic_approved = bool(critic_json.get("approved", False)) if critic_json else False
+        if not critic_approved:
+            hard_fail = {
+                "schema_version": "v1",
+                "situation": ["Critic gate blocked final output due evidence inconsistency."],
+                "quant_results": [
+                    "Advisor output was rejected by validation.",
+                    "Use deterministic local output or retry with simplified prompt.",
+                ],
+                "risk_rating": "ELEVATED",
+                "actions": ["Re-run with narrower scope and deterministic facts only."],
+                "monitoring_triggers": ["Critic issues resolved and approval=true."],
+                "evidence_used": ["architect_output", "quant_output", "critic_output"],
+                "notes": json.dumps(critic_json),
+                "insufficient_data": True,
+                "uncertainty_score": 0.8,
+                "confidence_reason": "Critic did not approve candidate JSON.",
+                "validation": {
+                    "critic_approved": False,
+                    "critic_issues": critic_json.get("issues", []) if critic_json else [],
+                    "required_fixes": critic_json.get("required_fixes", []) if critic_json else [],
+                },
+            }
+            return json.dumps(hard_fail)
+
         advisor_json.setdefault("schema_version", "v1")
         advisor_json["validation"] = {
-            "critic_approved": bool(critic_json.get("approved", True)) if critic_json else None,
+            "critic_approved": critic_approved,
             "critic_issues": critic_json.get("issues", []) if critic_json else [],
+            "required_fixes": critic_json.get("required_fixes", []) if critic_json else [],
             "uncertainty_score": critic_json.get("uncertainty_score"),
             "confidence_reason": critic_json.get("confidence_reason"),
         }

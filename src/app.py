@@ -4,6 +4,7 @@ Agentic Systemic Risk Simulator for Financial Contagion
 """
 
 import asyncio
+import concurrent.futures
 import sys
 import html
 import time
@@ -31,6 +32,7 @@ from src.agents.orchestrator import (
     run_query,
     run_parallel_workflow,
 )
+from src.agents.critic import create_critic_agent
 from src.core import data_loader, network, contagion
 from src.utils.azure_config import (
     get_agent_framework_chat_client,
@@ -182,6 +184,16 @@ WORKFLOW_TRANSITIONS = {
     "completed": set(),
 }
 
+MAX_COMPARE_TICKERS = 12
+CACHE_SEMANTIC_MIN_SCORE = 0.55
+CIRCUIT_COOLDOWN_SEC = 90
+QUERY_TOKEN_STOPWORDS = {
+    "what", "happens", "happen", "if", "the", "and", "for", "with", "from",
+    "then", "that", "this", "into", "using", "include", "between", "compare",
+    "systemic", "risk", "current", "market", "regime", "plan", "hedging",
+    "portfolio", "overweight", "underweight", "on",
+}
+
 # Company name aliases used for lightweight query parsing.
 COMPANY_NAME_MAP = {
     "JPMORGAN": "JPM", "JP MORGAN": "JPM", "GOLDMAN": "GS", "GOLDMAN SACHS": "GS",
@@ -230,6 +242,11 @@ defaults = {
     "last_structured_payload": None,
     "run_quality": None,
     "scenario_eval_results": None,
+    "compare_rows_local": [],
+    "compare_meta": {},
+    "gpt_fail_streak": 0,
+    "gpt_circuit_open_until": 0.0,
+    "run_cancel_requested": False,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -336,6 +353,13 @@ def is_complex_query(query: str) -> bool:
     return any(sig in q for sig in signals)
 
 
+def is_compare_query(query: str, parsed: dict | None) -> bool:
+    if not parsed or len(parsed.get("tickers", [])) < 2:
+        return False
+    q = query.lower()
+    return any(sig in q for sig in ["compare", "rank", "difference", "versus", " vs ", "between"])
+
+
 def is_query_in_scope(query: str, parsed: dict | None) -> tuple[bool, str]:
     """Guardrail: keep assistant focused on network/crisis/contagion scope."""
     if parsed:
@@ -392,6 +416,43 @@ def _prune_events(events: list[float], now_ts: float, window_sec: int = 60) -> l
     return [ts for ts in events if (now_ts - ts) <= window_sec]
 
 
+def _tokenize_query(query: str) -> set[str]:
+    return {
+        tok for tok in re.findall(r"[a-zA-Z]{2,}", query.lower())
+        if tok not in QUERY_TOKEN_STOPWORDS
+    }
+
+
+def _jaccard_similarity(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / max(1, len(a | b))
+
+
+def build_cache_fingerprint(
+    *,
+    parsed: dict | None,
+    threshold: float,
+    model: str,
+    risk_profile: str,
+    schema_version: str,
+    strategy: str,
+) -> dict:
+    tickers = sorted((parsed or {}).get("tickers", []))
+    return {
+        "route": "compare" if len(tickers) >= 2 else "single",
+        "tickers": tickers,
+        "ticker": (parsed or {}).get("ticker"),
+        "shock": (parsed or {}).get("shock"),
+        "date": (parsed or {}).get("date"),
+        "threshold": round(float(threshold), 3),
+        "model": model,
+        "risk_profile": risk_profile,
+        "schema_version": schema_version,
+        "strategy": strategy,
+    }
+
+
 def get_gpt_access_policy() -> dict:
     """Judge access policy: open by default, locked only if code is configured."""
     judge_code = _get_runtime_value("JUDGE_ACCESS_CODE", "")
@@ -440,6 +501,42 @@ def register_gpt_call() -> None:
     bucket = get_global_gpt_rate_bucket()
     bucket["events"] = _prune_events(bucket.get("events", []), now, 60)
     bucket["events"].append(now)
+
+
+def is_gpt_circuit_open() -> tuple[bool, float]:
+    now = time.time()
+    open_until = float(st.session_state.get("gpt_circuit_open_until", 0.0) or 0.0)
+    if open_until > now:
+        return True, open_until - now
+    return False, 0.0
+
+
+def register_gpt_success() -> None:
+    st.session_state.gpt_fail_streak = 0
+    st.session_state.gpt_circuit_open_until = 0.0
+
+
+def register_gpt_failure(reason: str) -> None:
+    streak = int(st.session_state.get("gpt_fail_streak", 0)) + 1
+    st.session_state.gpt_fail_streak = streak
+    if streak >= 3 or reason in {"rate_limit", "timeout"}:
+        st.session_state.gpt_circuit_open_until = max(
+            float(st.session_state.get("gpt_circuit_open_until", 0.0) or 0.0),
+            time.time() + CIRCUIT_COOLDOWN_SEC,
+        )
+
+
+def estimate_eta_seconds(history: list[dict], strategy: str, fallback: float = 18.0) -> float:
+    vals = []
+    for row in history[-20:]:
+        if row.get("policy", {}).get("router", {}).get("effective_strategy") != strategy:
+            continue
+        gpt_sec = row.get("timings", {}).get("gpt_sec")
+        if isinstance(gpt_sec, (int, float)) and gpt_sec > 0:
+            vals.append(float(gpt_sec))
+    if not vals:
+        return fallback
+    return float(np.percentile(vals, 75))
 
 
 def create_run_trace(
@@ -664,21 +761,34 @@ def choose_execution_policy(
         reason.append("unparseable_without_gpt")
 
     effective_strategy = selected_strategy
+    compare_intent = bool(parsed and len(parsed.get("tickers", [])) >= 2 and complex_query)
     if route == "gpt":
-        if complex_query and selected_strategy in {"orchestrator", "workflow_parallel"}:
+        if compare_intent:
+            effective_strategy = "commentary_direct"
+        elif complex_query and selected_strategy in {"orchestrator", "workflow_parallel"}:
             effective_strategy = "workflow_parallel"
         elif (not complex_query) and selected_strategy == "workflow_parallel":
             effective_strategy = "simple"
         elif selected_strategy not in {"simple", "orchestrator", "workflow_parallel"}:
             effective_strategy = "simple"
 
+    if effective_strategy == "workflow_parallel":
+        timeout_sec = 28
+        max_retries = 0
+    elif effective_strategy == "orchestrator":
+        timeout_sec = 20
+        max_retries = 0
+    else:
+        timeout_sec = 18
+        max_retries = 1
+
     return {
         "route": route,
         "run_local_first": bool(parsed),
         "should_run_gpt": route == "gpt",
         "effective_strategy": effective_strategy,
-        "timeout_sec": 45 if effective_strategy == "workflow_parallel" else 35,
-        "max_retries": 1 if effective_strategy == "workflow_parallel" else 2,
+        "timeout_sec": timeout_sec,
+        "max_retries": max_retries,
         "reason": ", ".join(reason) if reason else "default",
     }
 
@@ -737,6 +847,7 @@ def parse_structured_agent_output(text: str) -> dict | None:
         "uncertainty_score": float(payload.get("uncertainty_score", 0.5))
         if str(payload.get("uncertainty_score", "")).strip() != "" else 0.5,
         "confidence_reason": str(payload.get("confidence_reason", "")).strip(),
+        "validation": payload.get("validation", {}) if isinstance(payload.get("validation"), dict) else {},
     }
     parsed["uncertainty_score"] = max(0.0, min(1.0, parsed["uncertainty_score"]))
     return parsed
@@ -1023,14 +1134,16 @@ def _compute_compare_rows(
     tickers: list[str],
     shock_pct: int,
     model: str,
-) -> list[dict]:
+) -> tuple[list[dict], dict[str, contagion.ShockResult]]:
     """Compute deterministic metrics for multi-ticker comparison on same graph."""
     sector_dict = st.session_state.sector_dict
     rows: list[dict] = []
-    for ticker in tickers[:3]:
+    result_by_ticker: dict[str, contagion.ShockResult] = {}
+    for ticker in tickers[:MAX_COMPARE_TICKERS]:
         if ticker not in G:
             continue
         result = contagion.run_shock_scenario(G, ticker, shock_pct / 100.0, model)
+        result_by_ticker[ticker] = result
         s = result.summary()
 
         sector_stress: dict[str, float] = {}
@@ -1053,7 +1166,10 @@ def _compute_compare_rows(
                 "top_sectors": top_sector_text,
             }
         )
-    return rows
+    rows.sort(key=lambda x: (-x["total_stress"], -x["cascade_depth"], x["ticker"]))
+    for i, row in enumerate(rows, start=1):
+        row["rank"] = i
+    return rows, result_by_ticker
 
 
 def build_compare_facts_html(
@@ -1087,6 +1203,18 @@ def build_compare_facts_html(
     return "<br>".join(lines)
 
 
+def build_compare_rows_df(rows: list[dict]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    keep = [
+        "rank", "ticker", "cascade_depth", "n_affected", "n_defaulted",
+        "total_stress", "avg_stress_pct", "top_sectors",
+    ]
+    cols = [c for c in keep if c in df.columns]
+    return df[cols].copy()
+
+
 def build_agent_cache_key(
     query: str,
     strategy: str,
@@ -1111,6 +1239,47 @@ def build_agent_cache_key(
         "schema_version": schema_version,
     }
     return json.dumps(payload, sort_keys=True)
+
+
+def find_cached_agent_response(
+    *,
+    exact_key: str,
+    query: str,
+    fingerprint: dict,
+) -> tuple[dict | None, str]:
+    cache = st.session_state.agent_response_cache
+    exact = cache.get(exact_key)
+    if exact:
+        return exact, "exact"
+
+    q_tokens = _tokenize_query(query)
+    best_score = 0.0
+    best_entry = None
+    for entry in cache.values():
+        if not isinstance(entry, dict):
+            continue
+        fp = entry.get("fingerprint", {})
+        if not isinstance(fp, dict):
+            continue
+        if fp.get("tickers") != fingerprint.get("tickers"):
+            continue
+        if fp.get("shock") != fingerprint.get("shock"):
+            continue
+        if fp.get("date") != fingerprint.get("date"):
+            continue
+        if fp.get("model") != fingerprint.get("model"):
+            continue
+        if fp.get("risk_profile") != fingerprint.get("risk_profile"):
+            continue
+        e_tokens = set(entry.get("query_tokens", []))
+        score = _jaccard_similarity(q_tokens, e_tokens)
+        if score > best_score:
+            best_score = score
+            best_entry = entry
+
+    if best_entry and best_score >= CACHE_SEMANTIC_MIN_SCORE:
+        return best_entry, f"semantic:{best_score:.2f}"
+    return None, "miss"
 
 
 def get_agent_config_status() -> tuple[bool, str]:
@@ -1171,12 +1340,78 @@ async def _run_parallel_workflow_async(
     return await asyncio.wait_for(run_parallel_workflow(client, query, timeout_sec=timeout_sec), timeout=timeout_sec)
 
 
+def _run_direct_commentary_query(
+    query: str,
+    timeout_sec: int,
+    deployment_name: str | None = None,
+) -> str:
+    settings = get_settings()
+    model_name = deployment_name or settings.AZURE_OPENAI_DEPLOYMENT
+    client = get_openai_client()
+    resp = client.responses.create(
+        model=model_name,
+        input=query,
+        timeout=timeout_sec,
+    )
+    return (resp.output_text or "").strip()
+
+
+async def _run_critic_validation_async(
+    *,
+    query: str,
+    facts_plain: str,
+    candidate_json_text: str,
+    timeout_sec: int = 12,
+    deployment_name: str | None = None,
+) -> dict:
+    client = get_agent_framework_chat_client(deployment_name=deployment_name)
+    critic = create_critic_agent(client)
+    prompt = (
+        "Validate candidate JSON against deterministic evidence. Return strict JSON only.\n\n"
+        f"User query:\n{query}\n\n"
+        f"Deterministic evidence:\n{facts_plain}\n\n"
+        f"Candidate JSON:\n{candidate_json_text}"
+    )
+    out = await asyncio.wait_for(run_query(critic, prompt), timeout=timeout_sec)
+    parsed = extract_json_payload(out)
+    if not isinstance(parsed, dict):
+        return {
+            "approved": False,
+            "issues": ["Critic output was not valid JSON."],
+            "required_fixes": ["Return strict JSON only."],
+            "uncertainty_score": 0.8,
+            "confidence_reason": "Critic parsing failed.",
+        }
+    return parsed
+
+
+def run_critic_validation(
+    *,
+    query: str,
+    facts_plain: str,
+    candidate_json_text: str,
+    timeout_sec: int = 12,
+    deployment_name: str | None = None,
+) -> dict:
+    return _run_async(
+        _run_critic_validation_async(
+            query=query,
+            facts_plain=facts_plain,
+            candidate_json_text=candidate_json_text,
+            timeout_sec=timeout_sec,
+            deployment_name=deployment_name,
+        )
+    )
+
+
 def run_agent_query(
     query: str,
     timeout_sec: int = 35,
     strategy: str = "simple",
     deployment_name: str | None = None,
 ) -> str:
+    if strategy == "commentary_direct":
+        return _run_direct_commentary_query(query, timeout_sec, deployment_name=deployment_name)
     if strategy == "orchestrator":
         return _run_async(_run_orchestrator_query_async(query, timeout_sec, deployment_name=deployment_name))
     if strategy == "workflow_parallel":
@@ -1189,6 +1424,18 @@ def is_rate_limit_error(exc: Exception) -> bool:
     return "429" in text or "too many requests" in text or "rate limit" in text
 
 
+def is_timeout_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "timeout" in text or "timed out" in text
+
+
+def is_retryable_gpt_error(exc: Exception) -> bool:
+    if is_rate_limit_error(exc) or is_timeout_error(exc):
+        return True
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(sig in text for sig in ["connection", "temporarily unavailable", "service unavailable"])
+
+
 def run_agent_query_with_backoff(
     query: str,
     timeout_sec: int,
@@ -1196,10 +1443,12 @@ def run_agent_query_with_backoff(
     deployment_name: str | None = None,
     max_retries: int = 2,
     base_delay_sec: float = 1.5,
+    max_total_wait_sec: float = 24.0,
     on_backoff: Callable[[float, int, int], None] | None = None,
 ) -> str:
-    """Retry agent query on 429 with exponential backoff."""
+    """Retry agent query on transient failures with bounded total wait."""
     attempt = 0
+    started = time.perf_counter()
     while True:
         try:
             return run_agent_query(
@@ -1209,9 +1458,11 @@ def run_agent_query_with_backoff(
                 deployment_name=deployment_name,
             )
         except Exception as exc:
-            if not is_rate_limit_error(exc) or attempt >= max_retries:
+            elapsed = time.perf_counter() - started
+            remaining = max_total_wait_sec - elapsed
+            if (not is_retryable_gpt_error(exc)) or attempt >= max_retries or remaining <= 0.8:
                 raise
-            wait_sec = base_delay_sec * (2 ** attempt)
+            wait_sec = min(base_delay_sec * (2 ** attempt), max(0.5, remaining - 0.4))
             if on_backoff:
                 on_backoff(wait_sec, attempt + 1, max_retries + 1)
             time.sleep(wait_sec)
@@ -1834,7 +2085,12 @@ with st.sidebar:
         index=["simple", "orchestrator", "workflow_parallel"].index(st.session_state.agent_strategy)
         if st.session_state.agent_strategy in {"simple", "orchestrator", "workflow_parallel"} else 0,
         disabled=not st.session_state.agent_mode,
-        help="simple = one tool-calling agent. orchestrator = agent-as-tool chain. workflow_parallel = Architect+Quant parallel + Advisor+Critic.",
+        help=(
+            "simple = one tool-calling agent. orchestrator = agent-as-tool chain. "
+            "workflow_parallel = Architect+Quant parallel + Advisor+Critic. "
+            "For multi-ticker compare queries, app auto-switches to commentary_direct "
+            "(deterministic local compare + GPT commentary only)."
+        ),
     )
     st.session_state.high_quality_mode = st.toggle(
         "High quality mode (gpt-4o)",
@@ -2065,6 +2321,7 @@ if incoming_query:
     chat_query = normalize_chat_query(incoming_query)
     st.session_state.chat_history.append(("user", chat_query))
     parsed = parse_chat_query(chat_query)
+    compare_query = is_compare_query(chat_query, parsed)
     complex_query = is_complex_query(chat_query)
     in_scope, scope_reason = is_query_in_scope(chat_query, parsed)
     model_for_query = infer_model_from_query(chat_query)
@@ -2072,6 +2329,9 @@ if incoming_query:
     primary_deployment, fallback_deployment = get_deployment_routing(st.session_state.high_quality_mode)
     st.session_state.agent_messages = []
     st.session_state.last_structured_payload = None
+    st.session_state.compare_rows_local = []
+    st.session_state.compare_meta = {}
+    st.session_state.run_cancel_requested = False
     t_start = time.perf_counter()
     local_sec = None
     gpt_sec = None
@@ -2120,14 +2380,45 @@ if incoming_query:
         progress = st.progress(5)
         phase = st.empty()
         elapsed_box = st.empty()
+        eta_box = st.empty()
+        cancel_box = st.empty()
 
         def _step(pct: int, text: str) -> None:
             phase.markdown(f"**{text}**")
             progress.progress(pct)
             elapsed_box.caption(f"Elapsed: {time.perf_counter() - t_start:.1f}s")
+            if st.session_state.run_cancel_requested:
+                eta_box.caption("Cancel requested: run will stop at next safe checkpoint.")
+
+        def _heartbeat(phase_text: str, eta_sec: float) -> None:
+            elapsed_now = time.perf_counter() - t_start
+            phase.markdown(f"**{phase_text}**")
+            elapsed_box.caption(f"Elapsed: {elapsed_now:.1f}s")
+            eta_box.caption(f"ETA: {max(0.0, eta_sec):.1f}s")
+            if cancel_box.button("Cancel pending GPT steps", key=f"cancel_run_{trace['id']}"):
+                st.session_state.run_cancel_requested = True
+                trace_event(trace, "cancel_requested", "user clicked cancel")
+
+        def _run_with_heartbeat(callable_fn, phase_text: str, eta_sec: float):
+            pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future = pool.submit(callable_fn)
+            try:
+                while not future.done():
+                    _heartbeat(phase_text, eta_sec - (time.perf_counter() - t_start))
+                    if st.session_state.run_cancel_requested:
+                        future.cancel()
+                        raise RuntimeError("RunCancelledByUser")
+                    time.sleep(0.25)
+                return future.result()
+            finally:
+                pool.shutdown(wait=False, cancel_futures=True)
 
         _step(10, "Parsing user input")
-        trace_event(trace, "parse_complete", f"parsed={bool(parsed)}, complex={complex_query}")
+        trace_event(
+            trace,
+            "parse_complete",
+            f"parsed={bool(parsed)}, complex={complex_query}, compare={compare_query}",
+        )
 
         if not in_scope:
             _step(35, "Out-of-scope query for this app")
@@ -2152,23 +2443,67 @@ if incoming_query:
             if run_local_first:
                 advance_workflow(trace, "local_ready")
                 _step(30, "Running local network build and contagion simulation")
-                trace_event(trace, "local_start", f"ticker={parsed['ticker']}, shock={parsed['shock']}")
+                local_target = ",".join(parsed.get("tickers", [])) if compare_query else parsed.get("ticker", "n/a")
+                trace_event(trace, "local_start", f"target={local_target}, shock={parsed['shock']}")
                 t_local = time.perf_counter()
                 date = parsed.get("date") or selected_date
                 if not suppress_local_messages:
+                    target_text = (
+                        ", ".join(parsed.get("tickers", [])[:MAX_COMPARE_TICKERS])
+                        if compare_query else parsed["ticker"]
+                    )
                     st.session_state.agent_messages.append(
                         ("Sentinel", "🛡️", "agent-sentinel",
                          f'Understanding query: "<i>{chat_query}</i>"<br>'
-                         f'→ Target: <b>{parsed["ticker"]}</b>, Shock: <b>{parsed["shock"]}%</b>')
+                         f'→ Target: <b>{target_text}</b>, Shock: <b>{parsed["shock"]}%</b>')
                     )
                 G = do_build_network(date, threshold, emit_messages=not suppress_local_messages)
-                do_run_shock(
-                    G,
-                    parsed["ticker"],
-                    parsed["shock"],
-                    model_for_query,
-                    emit_messages=not suppress_local_messages,
-                )
+                if compare_query:
+                    compare_rows, result_by_ticker = _compute_compare_rows(
+                        G=G,
+                        tickers=parsed.get("tickers", []),
+                        shock_pct=parsed["shock"],
+                        model=model_for_query,
+                    )
+                    st.session_state.compare_rows_local = compare_rows
+                    st.session_state.compare_meta = {
+                        "requested_tickers": parsed.get("tickers", []),
+                        "evaluated_tickers": [r["ticker"] for r in compare_rows],
+                        "max_tickers": MAX_COMPARE_TICKERS,
+                    }
+                    if compare_rows:
+                        top_ticker = compare_rows[0]["ticker"]
+                        st.session_state.shock_result = result_by_ticker.get(top_ticker)
+                        if st.session_state.shock_result:
+                            st.session_state.current_wave = st.session_state.shock_result.cascade_depth
+                        if not suppress_local_messages:
+                            st.session_state.agent_messages.append(
+                                (
+                                    "Quant",
+                                    "📊",
+                                    "agent-quant",
+                                    f"<b>Deterministic Compare</b> — evaluated "
+                                    f"<b>{len(compare_rows)}</b> tickers ({model_for_query}) at {parsed['shock']}% shock.<br>"
+                                    f"Top impact: <b>{top_ticker}</b> (total stress {compare_rows[0]['total_stress']:.2f}).",
+                                )
+                            )
+                    else:
+                        st.session_state.agent_messages.append(
+                            (
+                                "Sentinel",
+                                "🛡️",
+                                "agent-sentinel",
+                                "No valid tickers found in graph for compare analysis.",
+                            )
+                        )
+                else:
+                    do_run_shock(
+                        G,
+                        parsed["ticker"],
+                        parsed["shock"],
+                        model_for_query,
+                        emit_messages=not suppress_local_messages,
+                    )
                 local_sec = time.perf_counter() - t_local
                 trace_event(trace, "local_done", f"{local_sec:.3f}s")
 
@@ -2181,8 +2516,21 @@ if incoming_query:
 
             should_run_gpt = bool(execution_policy.get("should_run_gpt"))
             gpt_policy_block_reason = ""
+            circuit_open, circuit_wait = is_gpt_circuit_open()
             if not runtime_access_policy["allowed"]:
                 gpt_policy_block_reason = f"access_locked:{runtime_access_policy['reason']}"
+            elif should_run_gpt and circuit_open:
+                should_run_gpt = False
+                gpt_policy_block_reason = f"circuit_open:{circuit_wait:.0f}s"
+                trace_event(trace, "gpt_policy_block", gpt_policy_block_reason)
+                st.session_state.agent_messages.append(
+                    (
+                        "Sentinel",
+                        "🛡️",
+                        "agent-sentinel",
+                        f"GPT circuit breaker active. Retrying in ~{circuit_wait:.0f}s. Using local output.",
+                    )
+                )
             if should_run_gpt:
                 rate_ok, rate_reason = check_gpt_rate_limit()
                 if not rate_ok:
@@ -2210,7 +2558,7 @@ if incoming_query:
                 t_gpt = time.perf_counter()
                 strategy = execution_policy.get("effective_strategy", st.session_state.agent_strategy)
                 timeout_policy = int(execution_policy.get("timeout_sec", st.session_state.agent_timeout_sec))
-                retry_policy = int(execution_policy.get("max_retries", 2))
+                retry_policy = int(execution_policy.get("max_retries", 1))
                 timeout_sec_effective = min(timeout_policy, st.session_state.agent_timeout_sec)
                 cache_key = build_agent_cache_key(
                     query=chat_query,
@@ -2222,16 +2570,28 @@ if incoming_query:
                     risk_profile=st.session_state.risk_profile,
                     schema_version=STRUCTURED_SCHEMA_VERSION,
                 )
+                fingerprint = build_cache_fingerprint(
+                    parsed=parsed,
+                    threshold=threshold,
+                    model=model_for_query,
+                    risk_profile=st.session_state.risk_profile,
+                    schema_version=STRUCTURED_SCHEMA_VERSION,
+                    strategy=strategy,
+                )
+
                 facts_html = build_simulation_facts_html() if parsed else build_context_facts_html()
                 facts_mode = "single" if parsed else "context"
-                if parsed and complex_query and len(parsed.get("tickers", [])) >= 2 and st.session_state.graph_data:
+                if compare_query and st.session_state.graph_data:
                     gd = st.session_state.graph_data
-                    compare_rows = _compute_compare_rows(
-                        G=gd["G"],
-                        tickers=parsed["tickers"],
-                        shock_pct=parsed["shock"],
-                        model=model_for_query,
-                    )
+                    compare_rows = st.session_state.compare_rows_local
+                    if not compare_rows:
+                        compare_rows, _ = _compute_compare_rows(
+                            G=gd["G"],
+                            tickers=parsed.get("tickers", []),
+                            shock_pct=parsed["shock"],
+                            model=model_for_query,
+                        )
+                        st.session_state.compare_rows_local = compare_rows
                     facts_html = build_compare_facts_html(
                         rows=compare_rows,
                         date=str(gd.get("date", parsed.get("date") or "n/a")),
@@ -2265,6 +2625,13 @@ if incoming_query:
                     risk_profile=st.session_state.risk_profile,
                     memory_hint=memory_hint,
                 )
+                if compare_query:
+                    prompt_for_agent += (
+                        "\n\nAdditional rule for compare mode:\n"
+                        "- Treat deterministic compare facts as authoritative.\n"
+                        "- Do not run or infer alternative simulations.\n"
+                        "- Add only concise commentary and hedging implications from provided facts."
+                    )
 
                 def _push_gpt_message(
                     answer_text: str,
@@ -2298,38 +2665,141 @@ if incoming_query:
                 def _on_backoff(wait_sec: float, retry_idx: int, max_attempts: int) -> None:
                     _step(
                         70,
-                        f"Rate limited (429). Waiting {wait_sec:.1f}s before retry {retry_idx + 1}/{max_attempts}",
+                        f"Transient error. Waiting {wait_sec:.1f}s before retry {retry_idx + 1}/{max_attempts}",
                     )
                     trace_event(trace, "gpt_backoff", f"wait={wait_sec:.1f}s retry={retry_idx + 1}/{max_attempts}")
 
-                cached = st.session_state.agent_response_cache.get(cache_key)
-                trace["policy"]["cache_hit"] = bool(cached)
-                if cached:
+                def _run_candidate(
+                    deployment: str,
+                    call_strategy: str,
+                    call_timeout: int,
+                    call_retries: int,
+                    eta_fallback: float,
+                ) -> tuple[str, dict]:
+                    register_gpt_call()
+                    answer_text = _run_with_heartbeat(
+                        lambda: run_agent_query_with_backoff(
+                            prompt_for_agent,
+                            timeout_sec=call_timeout,
+                            strategy=call_strategy,
+                            deployment_name=deployment,
+                            max_retries=call_retries,
+                            max_total_wait_sec=min(30.0, call_timeout + 10.0),
+                            on_backoff=_on_backoff,
+                        ),
+                        f"Running GPT analysis ({call_strategy})",
+                        eta_sec=eta_fallback,
+                    )
+                    payload = parse_structured_agent_output(answer_text)
+                    if not payload:
+                        raise RuntimeError("StructuredOutputMissing")
+                    return answer_text, payload
+
+                def _critic_gate_or_raise(
+                    candidate_answer: str,
+                    candidate_payload: dict,
+                    deployment: str,
+                ) -> tuple[str, dict, dict]:
+                    answer_curr = candidate_answer
+                    payload_curr = candidate_payload
+                    critic_result: dict = {}
+                    for gate_round in range(2):
+                        _step(78 + gate_round * 4, "Validating output with Critic gate")
+                        critic_result = run_critic_validation(
+                            query=chat_query,
+                            facts_plain=facts_plain,
+                            candidate_json_text=json.dumps(payload_curr),
+                            timeout_sec=10,
+                            deployment_name=deployment,
+                        )
+                        approved = bool(critic_result.get("approved", False))
+                        trace_event(trace, "critic_gate", f"approved={approved}")
+                        if approved:
+                            payload_curr["validation"] = {
+                                "critic_approved": True,
+                                "critic_issues": critic_result.get("issues", []),
+                                "required_fixes": critic_result.get("required_fixes", []),
+                            }
+                            if "uncertainty_score" not in payload_curr and critic_result.get("uncertainty_score") is not None:
+                                payload_curr["uncertainty_score"] = critic_result.get("uncertainty_score")
+                            if "confidence_reason" not in payload_curr and critic_result.get("confidence_reason"):
+                                payload_curr["confidence_reason"] = critic_result.get("confidence_reason")
+                            return answer_curr, payload_curr, critic_result
+
+                        if gate_round >= 1:
+                            break
+                        issues = critic_result.get("issues", [])
+                        fixes = critic_result.get("required_fixes", [])
+                        revision_prompt = (
+                            f"{prompt_for_agent}\n\n"
+                            "Critic rejected the previous JSON. Revise it now and return strict JSON only.\n"
+                            f"Issues: {issues}\n"
+                            f"Required fixes: {fixes}\n"
+                            f"Previous JSON: {json.dumps(payload_curr)}"
+                        )
+                        register_gpt_call()
+                        answer_curr = _run_with_heartbeat(
+                            lambda: run_agent_query_with_backoff(
+                                revision_prompt,
+                                timeout_sec=max(10, timeout_sec_effective - 4),
+                                strategy="commentary_direct" if compare_query else "simple",
+                                deployment_name=deployment,
+                                max_retries=0,
+                                max_total_wait_sec=14.0,
+                                on_backoff=_on_backoff,
+                            ),
+                            "Revising output after critic feedback",
+                            eta_sec=8.0,
+                        )
+                        payload_curr = parse_structured_agent_output(answer_curr)
+                        if not payload_curr:
+                            raise RuntimeError("CriticGateFailed: revision output not structured.")
+                    raise RuntimeError("CriticGateFailed")
+
+                cache_entry, cache_mode = find_cached_agent_response(
+                    exact_key=cache_key,
+                    query=chat_query,
+                    fingerprint=fingerprint,
+                )
+                trace["policy"]["cache_hit"] = bool(cache_entry)
+                trace["policy"]["cache_mode"] = cache_mode
+                if cache_entry:
                     _step(60, "Using cached GPT analysis")
                     _push_gpt_message(
-                        answer_text=cached["answer"],
-                        deployment_used=cached.get("deployment", primary_deployment),
-                        label_strategy=cached.get("strategy", strategy),
+                        answer_text=cache_entry["answer"],
+                        deployment_used=cache_entry.get("deployment", primary_deployment),
+                        label_strategy=cache_entry.get("strategy", strategy),
                         cached=True,
-                        structured_payload=cached.get("payload"),
+                        structured_payload=cache_entry.get("payload"),
                     )
                     gpt_success = True
-                    engine_label = f"{cached.get('deployment', primary_deployment)} ({strategy}, cached)"
+                    register_gpt_success()
+                    engine_label = (
+                        f"{cache_entry.get('deployment', primary_deployment)} "
+                        f"({cache_entry.get('strategy', strategy)}, {cache_mode})"
+                    )
                     run_state = "gpt_cached"
                     trace_event(trace, "gpt_cache_hit", engine_label)
                 else:
                     try:
-                        register_gpt_call()
-                        _step(60, f"Running GPT analysis ({strategy})")
-                        answer = run_agent_query_with_backoff(
-                            prompt_for_agent,
-                            timeout_sec=timeout_sec_effective,
+                        eta_guess = estimate_eta_seconds(
+                            st.session_state.run_trace_history,
                             strategy=strategy,
-                            deployment_name=primary_deployment,
-                            max_retries=retry_policy,
-                            on_backoff=_on_backoff,
+                            fallback=float(timeout_sec_effective),
                         )
-                        parsed_payload = parse_structured_agent_output(answer)
+                        _step(60, f"Running GPT analysis ({strategy})")
+                        answer, parsed_payload = _run_candidate(
+                            deployment=primary_deployment,
+                            call_strategy=strategy,
+                            call_timeout=timeout_sec_effective,
+                            call_retries=retry_policy,
+                            eta_fallback=eta_guess,
+                        )
+                        answer, parsed_payload, critic_result = _critic_gate_or_raise(
+                            answer,
+                            parsed_payload,
+                            deployment=primary_deployment,
+                        )
                         _push_gpt_message(answer, primary_deployment, strategy, structured_payload=parsed_payload)
                         st.session_state.agent_response_cache[cache_key] = {
                             "answer": answer,
@@ -2337,109 +2807,86 @@ if incoming_query:
                             "deployment": primary_deployment,
                             "strategy": strategy,
                             "ts": time.time(),
+                            "query_tokens": sorted(_tokenize_query(chat_query)),
+                            "fingerprint": fingerprint,
+                            "critic": critic_result,
                         }
                         gpt_success = True
+                        register_gpt_success()
                         engine_label = f"{primary_deployment} ({strategy})"
                         run_state = "gpt_ok"
                         trace_event(trace, "gpt_ok", engine_label)
                     except Exception as exc:
-                        trace_event(trace, "gpt_err", f"{type(exc).__name__}: {str(exc)[:120]}")
-                        # If full orchestrator times out, retry once with simple agent.
-                        retried = False
-                        if strategy in {"orchestrator", "workflow_parallel"}:
-                            try:
-                                _step(72, "Orchestrator timeout. Retrying with simple strategy")
-                                answer = run_agent_query_with_backoff(
-                                    prompt_for_agent,
-                                    timeout_sec=min(45, timeout_sec_effective),
-                                    strategy="simple",
-                                    deployment_name=primary_deployment,
-                                    max_retries=1,
-                                    on_backoff=_on_backoff,
-                                )
-                                parsed_payload = parse_structured_agent_output(answer)
-                                _push_gpt_message(
-                                    answer,
-                                    primary_deployment,
-                                    "simple",
-                                    structured_payload=parsed_payload,
-                                )
-                                st.session_state.agent_response_cache[cache_key] = {
-                                    "answer": answer,
-                                    "payload": parsed_payload,
-                                    "deployment": primary_deployment,
-                                    "strategy": "simple",
-                                    "ts": time.time(),
-                                }
-                                retried = True
-                                gpt_success = True
-                                engine_label = f"{primary_deployment} (simple retry)"
-                                run_state = "gpt_retry_ok"
-                                trace_event(trace, "gpt_retry_ok", engine_label)
-                            except Exception:
-                                retried = False
+                        trace_event(trace, "gpt_err", f"{type(exc).__name__}: {str(exc)[:160]}")
+                        fail_reason = "timeout" if is_timeout_error(exc) else ("rate_limit" if is_rate_limit_error(exc) else "other")
+                        if "RunCancelledByUser" in str(exc):
+                            fail_reason = "cancelled"
 
-                        # If we hit Azure TPM/RPM limits, retry on fallback deployment.
-                        if not retried and is_rate_limit_error(exc):
-                            try:
-                                _step(80, f"Rate limit on {primary_deployment}. Retrying with {fallback_deployment}")
-                                answer = run_agent_query_with_backoff(
-                                    prompt_for_agent,
-                                    timeout_sec=min(45, timeout_sec_effective),
-                                    strategy="simple",
-                                    deployment_name=fallback_deployment,
-                                    max_retries=1,
-                                    on_backoff=_on_backoff,
-                                )
-                                parsed_payload = parse_structured_agent_output(answer)
-                                _push_gpt_message(
-                                    answer,
-                                    fallback_deployment,
-                                    "simple",
-                                    structured_payload=parsed_payload,
-                                )
-                                st.session_state.agent_response_cache[cache_key] = {
-                                    "answer": answer,
-                                    "payload": parsed_payload,
-                                    "deployment": fallback_deployment,
-                                    "strategy": "simple",
-                                    "ts": time.time(),
-                                }
-                                retried = True
-                                gpt_success = True
-                                engine_label = f"{fallback_deployment} (fallback)"
-                                run_state = "gpt_fallback_ok"
-                                trace_event(trace, "gpt_fallback_ok", engine_label)
-                            except Exception:
-                                retried = False
-
-                        if not retried:
+                        if fail_reason == "cancelled":
                             st.session_state.agent_messages.append(
-                                ("Sentinel", "🛡️", "agent-sentinel",
-                                 f"⚠️ GPT agent failed ({type(exc).__name__}: {html.escape(str(exc))[:220]}). "
-                                 f"Using local simulation output only.")
+                                ("Sentinel", "🛡️", "agent-sentinel", "Run cancelled by user before GPT completion.")
                             )
-                            if parsed and local_sec is None:
-                                _step(88, "GPT unavailable. Running local fallback simulation")
-                                t_local = time.perf_counter()
-                                date = parsed.get("date") or selected_date
+                            run_state = "cancelled"
+                        else:
+                            register_gpt_failure(fail_reason)
+                            fallback_ok = False
+                            if fail_reason in {"rate_limit", "timeout", "other"}:
+                                try:
+                                    _step(82, f"Retrying on fallback deployment ({fallback_deployment})")
+                                    answer, parsed_payload = _run_candidate(
+                                        deployment=fallback_deployment,
+                                        call_strategy="commentary_direct" if compare_query else "simple",
+                                        call_timeout=max(12, timeout_sec_effective - 4),
+                                        call_retries=0,
+                                        eta_fallback=10.0,
+                                    )
+                                    answer, parsed_payload, critic_result = _critic_gate_or_raise(
+                                        answer,
+                                        parsed_payload,
+                                        deployment=fallback_deployment,
+                                    )
+                                    _push_gpt_message(
+                                        answer,
+                                        fallback_deployment,
+                                        "commentary_direct" if compare_query else "simple",
+                                        structured_payload=parsed_payload,
+                                    )
+                                    st.session_state.agent_response_cache[cache_key] = {
+                                        "answer": answer,
+                                        "payload": parsed_payload,
+                                        "deployment": fallback_deployment,
+                                        "strategy": "commentary_direct" if compare_query else "simple",
+                                        "ts": time.time(),
+                                        "query_tokens": sorted(_tokenize_query(chat_query)),
+                                        "fingerprint": fingerprint,
+                                        "critic": critic_result,
+                                    }
+                                    gpt_success = True
+                                    register_gpt_success()
+                                    engine_label = f"{fallback_deployment} (fallback)"
+                                    run_state = "gpt_fallback_ok"
+                                    trace_event(trace, "gpt_fallback_ok", engine_label)
+                                    fallback_ok = True
+                                except Exception as exc_fb:
+                                    trace_event(trace, "gpt_fallback_err", f"{type(exc_fb).__name__}: {str(exc_fb)[:140]}")
+
+                            if not fallback_ok:
                                 st.session_state.agent_messages.append(
                                     ("Sentinel", "🛡️", "agent-sentinel",
-                                     f'Fallback local run<br>→ Target: <b>{parsed["ticker"]}</b>, Shock: <b>{parsed["shock"]}%</b>')
+                                     f"⚠️ GPT analysis blocked ({type(exc).__name__}). Using deterministic local output only.")
                                 )
-                                G = do_build_network(date, threshold)
-                                do_run_shock(G, parsed["ticker"], parsed["shock"], model_for_query)
-                                local_sec = time.perf_counter() - t_local
-                                engine_label = "Local engine (after GPT failure)"
-                                run_state = "gpt_failed_local_fallback"
-                                trace_event(trace, "local_fallback_done", f"{local_sec:.3f}s")
-                            elif not parsed:
-                                st.session_state.agent_messages.append(
-                                    ("Sentinel", "🛡️", "agent-sentinel",
-                                     f'Could not parse query locally: "<i>{chat_query}</i>". '
-                                     f'Try: "What if JPM crashes 40%?" or "Simulate AAPL 60% shock"')
-                                )
-                            run_state = "gpt_failed"
+                                if parsed and local_sec is None:
+                                    _step(88, "GPT unavailable. Running local fallback simulation")
+                                    t_local = time.perf_counter()
+                                    date = parsed.get("date") or selected_date
+                                    G = do_build_network(date, threshold)
+                                    do_run_shock(G, parsed["ticker"], parsed["shock"], model_for_query)
+                                    local_sec = time.perf_counter() - t_local
+                                    trace_event(trace, "local_fallback_done", f"{local_sec:.3f}s")
+                                    engine_label = "Local engine (after GPT failure)"
+                                    run_state = "gpt_failed_local_fallback"
+                                else:
+                                    run_state = "gpt_failed"
                         trace["policy"]["cache_hit"] = False
                 gpt_sec = time.perf_counter() - t_gpt
                 trace_event(trace, "gpt_done", f"{gpt_sec:.3f}s")
@@ -2490,6 +2937,8 @@ if incoming_query:
         "state": run_state,
         "gpt_calls_total_session": st.session_state.gpt_calls_total_session,
         "gpt_rate_limit_hits": st.session_state.gpt_rate_limit_hits,
+        "gpt_fail_streak": st.session_state.gpt_fail_streak,
+        "gpt_circuit_open_until": st.session_state.gpt_circuit_open_until,
     }
     trace["timings"] = {
         "total_sec": round(elapsed, 3),
@@ -2620,6 +3069,7 @@ with info_col:
             "out_of_scope": "Out Of Scope",
             "gpt_policy_block_local": "GPT Blocked (Local Only)",
             "gpt_policy_block_parse_failed": "GPT Blocked + Parse Failed",
+            "cancelled": "Cancelled",
         }
         st.caption(f"Last run: {badge_map.get(run_metrics.get('state', ''), run_metrics.get('state', 'n/a'))}")
         tcols = st.columns(4)
@@ -2635,6 +3085,28 @@ with info_col:
             agent_message(name, icon, css, text)
     else:
         st.info("Type a question below, use a **Crisis Preset**, or click **Build** → **Shock**.")
+
+    if st.session_state.compare_rows_local:
+        st.markdown("### 🧮 Deterministic Compare")
+        compare_df = build_compare_rows_df(st.session_state.compare_rows_local)
+        if not compare_df.empty:
+            st.dataframe(
+                compare_df,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "avg_stress_pct": st.column_config.ProgressColumn(
+                        "avg_stress_pct", min_value=0, max_value=100, format="%.2f%%"
+                    ),
+                },
+            )
+            meta = st.session_state.compare_meta or {}
+            req = len(meta.get("requested_tickers", []))
+            ev = len(meta.get("evaluated_tickers", []))
+            if req > ev:
+                st.caption(
+                    f"Compared {ev}/{req} tickers (limit {meta.get('max_tickers', MAX_COMPARE_TICKERS)} per run)."
+                )
 
     if st.session_state.show_explainability and st.session_state.run_trace:
         trace = st.session_state.run_trace
@@ -2659,6 +3131,7 @@ with info_col:
                 "gpt_access_allowed": p.get("gpt_access_allowed"),
                 "gpt_access_reason": p.get("gpt_access_reason"),
                 "gpt_block_reason": p.get("gpt_block_reason", "none"),
+                "cache_mode": p.get("cache_mode", "n/a"),
                 "facts_mode": p.get("facts_mode", "none"),
                 "engine": r.get("engine"),
                 "timings": t,
@@ -2683,7 +3156,11 @@ with info_col:
             hcols[1].metric("GPT success", f"{sum(1 for h in history if h.get('result', {}).get('gpt_success'))}/{len(history)}")
             hcols[2].metric("Avg total", f"{np.mean([h.get('timings', {}).get('total_sec', 0.0) for h in history]):.1f}s")
             st.caption("Recent route states: " + ", ".join(pd.Series(states).value_counts().head(4).index.tolist()))
-            st.caption(f"Session GPT calls: {st.session_state.gpt_calls_total_session} | Policy throttles: {st.session_state.gpt_rate_limit_hits}")
+            st.caption(
+                f"Session GPT calls: {st.session_state.gpt_calls_total_session} | "
+                f"Policy throttles: {st.session_state.gpt_rate_limit_hits} | "
+                f"Fail streak: {st.session_state.gpt_fail_streak}"
+            )
 
             quality = summarize_quality(history)
             if quality:
