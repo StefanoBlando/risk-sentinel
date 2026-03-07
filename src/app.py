@@ -42,6 +42,7 @@ from src.agents.evidence_rag import (
     retrieve_evidence,
     serialize_retrieved,
 )
+from src.agents.evidence_validation import validate_payload_evidence
 from src.core import data_loader, network, contagion
 from src import agentic_ops, reporting, ui_panels
 from src.utils.azure_config import (
@@ -1142,7 +1143,9 @@ def build_structured_prompt(
         "- Keep each list concise (max 4 items).\n",
         "- Return uncertainty_score between 0.0 and 1.0.\n",
         f"- Risk profile to optimize for: {risk_profile} ({profile_hint})\n",
-        "- If RAG context is used, cite R# references in evidence_used and notes.\n",
+        "- In evidence_used, include only E#/R# references actually used.\n",
+        "- Any numeric claim must be traceable via evidence_used references.\n",
+        "- If RAG context is used, cite only the retrieved R# references.\n",
         "- If facts are insufficient, set insufficient_data=true and explain in notes.\n\n",
         f"Deterministic facts:\n{facts_plain}\n\n",
     ]
@@ -3765,13 +3768,38 @@ if incoming_query:
                     max_rounds = agentic_ops.critic_round_limit(bool(st.session_state.critic_auto_repair))
                     for gate_round in range(max_rounds):
                         _step(78 + gate_round * 4, "Validating output with Critic gate")
-                        critic_result = run_critic_validation(
-                            query=chat_query,
-                            facts_plain=facts_plain,
-                            candidate_json_text=json.dumps(payload_curr),
-                            timeout_sec=10,
-                            deployment_name=deployment,
+                        local_gate = validate_payload_evidence(
+                            payload_curr,
+                            allowed_r_refs=set(trace["policy"].get("rag_refs", [])),
+                            require_reference_for_numeric_claims=True,
+                            facts_available=(facts_mode != "none"),
                         )
+                        trace_event(
+                            trace,
+                            "evidence_gate",
+                            f"approved={local_gate['approved']} issues={len(local_gate['issues'])}",
+                        )
+
+                        if local_gate["approved"]:
+                            critic_result = run_critic_validation(
+                                query=chat_query,
+                                facts_plain=facts_plain,
+                                candidate_json_text=json.dumps(payload_curr),
+                                timeout_sec=10,
+                                deployment_name=deployment,
+                            )
+                        else:
+                            critic_result = {
+                                "approved": False,
+                                "issues": local_gate["issues"],
+                                "required_fixes": local_gate["required_fixes"],
+                                "uncertainty_score": max(
+                                    float(payload_curr.get("uncertainty_score", 0.5) or 0.5),
+                                    0.7,
+                                ),
+                                "confidence_reason": "Local evidence gate failed.",
+                            }
+
                         approved = bool(critic_result.get("approved", False))
                         trace_event(trace, "critic_gate", f"approved={approved}")
                         if approved:
@@ -3780,6 +3808,7 @@ if incoming_query:
                                 "critic_rounds": gate_round + 1,
                                 "critic_issues": critic_result.get("issues", []),
                                 "required_fixes": critic_result.get("required_fixes", []),
+                                "local_evidence_gate": local_gate,
                             }
                             if "uncertainty_score" not in payload_curr and critic_result.get("uncertainty_score") is not None:
                                 payload_curr["uncertainty_score"] = critic_result.get("uncertainty_score")
@@ -3822,6 +3851,21 @@ if incoming_query:
                     query=chat_query,
                     fingerprint=fingerprint,
                 )
+                if cache_entry and isinstance(cache_entry.get("payload"), dict):
+                    cache_gate = validate_payload_evidence(
+                        cache_entry["payload"],
+                        allowed_r_refs=set(trace["policy"].get("rag_refs", [])),
+                        require_reference_for_numeric_claims=True,
+                        facts_available=(facts_mode != "none"),
+                    )
+                    if not cache_gate["approved"]:
+                        trace_event(
+                            trace,
+                            "gpt_cache_rejected",
+                            f"issues={len(cache_gate['issues'])}",
+                        )
+                        cache_entry = None
+                        cache_mode = "none"
                 trace["policy"]["cache_hit"] = bool(cache_entry)
                 trace["policy"]["cache_mode"] = cache_mode
                 if cache_entry:

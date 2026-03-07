@@ -22,6 +22,7 @@ from .advisor import create_advisor_agent
 from .architect import create_architect_agent
 from .critic import create_critic_agent
 from .simulator import create_quant_agent
+from .evidence_validation import validate_payload_evidence
 from .tool_gateway import GatewayResult, ToolGateway
 from src.core import data_loader
 from .tools import (
@@ -631,10 +632,30 @@ async def run_control_plane_workflow(
 
         candidate.setdefault("schema_version", "v1")
         candidate.setdefault("evidence_used", ledger.ids())
+        local_evidence_gate = validate_payload_evidence(
+            candidate,
+            allowed_e_refs=set(ledger.ids()),
+            allowed_r_refs=set(),
+            require_reference_for_numeric_claims=True,
+            facts_available=True,
+        )
+        if not local_evidence_gate["approved"]:
+            approved = False
+            issues = list(critic_json.get("issues", []) if isinstance(critic_json, dict) else [])
+            fixes = list(critic_json.get("required_fixes", []) if isinstance(critic_json, dict) else [])
+            issues.extend(local_evidence_gate["issues"])
+            fixes.extend(local_evidence_gate["required_fixes"])
+            critic_json = {
+                **(critic_json if isinstance(critic_json, dict) else {}),
+                "approved": False,
+                "issues": sorted(set(str(x) for x in issues if str(x).strip())),
+                "required_fixes": sorted(set(str(x) for x in fixes if str(x).strip())),
+            }
         candidate["validation"] = {
             "critic_approved": approved,
             "critic_issues": critic_json.get("issues", []) if critic_json else [],
             "required_fixes": critic_json.get("required_fixes", []) if critic_json else [],
+            "local_evidence_gate": local_evidence_gate,
             "control_plane_state": machine.state,
             "events": [
                 {
@@ -661,7 +682,7 @@ async def run_control_plane_workflow(
             f"approved={approved} uncertainty={candidate.get('uncertainty_score', 0.5)}"
         )
         GLOBAL_MEMORY.add_episode(query=query, summary=summary, regime=regime, data_tag="v1")
-        GLOBAL_MEMORY.put_semantic(sem_key, summary, regime="unknown", data_tag="v1")
+        GLOBAL_MEMORY.put_semantic(sem_key, summary, regime=regime, data_tag="v1")
 
         return json.dumps(candidate)
 
