@@ -12,10 +12,17 @@ Built for the **Microsoft AI Dev Days Hackathon 2026**.
 
 ## Demo
 
-![RiskSentinel Screenshot](docs/screenshot.png)
+![RiskSentinel Screenshot](risksentinel.jpg)
 
 **Key features:**
 - Natural language queries: *"What if Tesla crashes 60%?"*
+- Control-plane orchestration (`Planner -> Architect+Quant -> Advisor -> Critic`) with hard guardrails
+- Evidence-RAG context (historical crises + prior runs) injected with citations (`R1..Rn`)
+- Judge dashboard KPIs (critic pass-rate, factual consistency, p95 latency, fallback rate)
+- One-click `Run Full Agentic Demo` flow (Build + Commander + Autonomous + Co-Pilot)
+- Agentic Ops pack: Scenario Commander, Autonomous Stress Test, Portfolio Co-Pilot
+- Auto-generated portfolio from network topology (PageRank + sector diversification)
+- Formal business KPI formula (expected stress, coverage, efficiency, avoided loss)
 - Animated cascade propagation with Play/Pause and wave slider
 - 3 contagion models: DebtRank, Linear Threshold, Cascade Removal
 - Side-by-side model comparison
@@ -29,32 +36,33 @@ Built for the **Microsoft AI Dev Days Hackathon 2026**.
 ## Architecture
 
 ```
-User: "What happens if JPMorgan crashes 40%?"
+User query
   │
   ▼
-🛡️ Orchestrator (Agent Framework)
+🧭 Control Plane (deterministic policy engine)
+  ├─ state machine: received -> local_facts -> analysis -> critic -> finalize
+  ├─ evidence ledger: E1, E2, ...
+  ├─ tool gateway: timeout/retry/schema/error taxonomy
+  └─ model router: lite(planner/critic) + strong(advisor)
   │
-  ├─→ 🔧 The Architect — builds S&P 500 correlation network (210 nodes)
-  │     → identifies JPM's connections, centrality, market regime
-  │
-  ├─→ 📊 The Quant — runs DebtRank shock propagation
-  │     → 3 cascade waves, severity tiers, sector breakdown
-  │
-  └─→ 📋 The Advisor — interprets results via GPT-4o
-        → risk rating, hedging strategies, monitoring triggers
+  ├─ Planner (short plan)
+  ├─ Architect + Quant (parallel)
+  ├─ Advisor (strict JSON synthesis)
+  └─ Critic (hard validation gate, max 1 revision)
   │
   ▼
-Interactive animated graph + agent analysis + risk report
+Streamlit/Chainlit output + explainability trace + judge KPIs
 ```
 
 ### Agent Squad
 
 | Agent | Role | Tools |
 |-------|------|-------|
-| **The Architect** | Network topology & market regime analysis | `build_network`, `get_top_systemic_nodes`, `get_node_connections`, `get_market_regime` |
+| **The Planner** | Short bounded orchestration plan | No tools |
+| **The Architect** | Network topology & market regime analysis | `build_network_for_date`, `get_top_systemic_nodes`, `get_node_connections`, `get_market_regime` |
 | **The Quant** | Shock propagation simulation | `run_shock_simulation`, `compare_shock_models`, `get_cascade_waves` |
-| **The Advisor** | Risk assessment & mitigation advice | `get_risk_summary`, `run_shock_simulation`, `get_node_connections` |
-| **Orchestrator** | Routes queries, coordinates pipeline | Agent-as-tool pattern |
+| **The Advisor** | Risk assessment & mitigation advice | `get_risk_summary`, `run_shock_simulation`, `get_node_connections`, `get_market_regime` |
+| **The Critic** | Validation gate on deterministic evidence | No tools |
 
 ### Contagion Models
 
@@ -123,15 +131,33 @@ cp .env.example .env
 ### Run
 
 ```bash
-streamlit run src/app.py
+python -m streamlit run src/app.py
 ```
 
 The app opens at `http://localhost:8501`. The simulation engine works fully offline — Azure is only needed for the LLM-powered agent analysis.
+
+### Run (Chainlit chat)
+
+```bash
+python -m chainlit run chainlit_app.py -w
+```
+
+Optional GPT control-plane mode:
+
+```bash
+CHAINLIT_USE_GPT=1 python -m chainlit run chainlit_app.py -w
+```
 
 ### Deploy on Streamlit Cloud
 
 - Full guide: `docs/streamlit_cloud_setup.md`
 - Secrets template: `.streamlit/secrets.toml.example`
+
+### Hackathon Docs
+
+- Pitch draft: `docs/pitch.md`
+- Demo script: `docs/demo_script.md`
+- Architecture diagram: `docs/architecture_diagram.md`
 
 ---
 
@@ -143,17 +169,28 @@ The app opens at `http://localhost:8501`. The simulation engine works fully offl
 │   │   ├── architect.py     # The Architect — Network Agent
 │   │   ├── simulator.py     # The Quant — Simulator Agent
 │   │   ├── advisor.py       # The Advisor — Strategy Agent
-│   │   ├── orchestrator.py  # Multi-agent orchestration
-│   │   └── tools.py         # 8 tool functions for agents
+│   │   ├── critic.py        # The Critic — Validation Agent
+│   │   ├── orchestrator.py  # Orchestrator + control-plane routing
+│   │   ├── control_plane.py # Policy/state-machine/evidence orchestration
+│   │   ├── tool_gateway.py  # Unified deterministic tool gateway
+│   │   ├── evaluation.py    # Judge/evaluation KPI helpers
+│   │   ├── evidence_rag.py  # Evidence retrieval and prompt block formatting
+│   │   └── tools.py         # MCP-ready JSON tool wrappers
 │   ├── core/                # Simulation engine (decoupled from agents)
 │   │   ├── data_loader.py   # Data ingestion from pre-computed datasets
 │   │   ├── network.py       # NetworkX graph construction & metrics
 │   │   └── contagion.py     # Shock propagation algorithms
 │   ├── utils/
 │   │   └── azure_config.py  # Azure/Foundry configuration
+│   ├── agentic_ops.py       # Deterministic agentic ops (commander/autonomous/portfolio)
+│   ├── reporting.py         # Action pack and JSON-safe reporting payloads
+│   ├── ui_panels.py         # Explainability badges + KPI display helpers
 │   └── app.py               # Streamlit main app
-├── tests/                   # 41 unit tests
+├── chainlit_app.py          # Chainlit chat app
+├── scripts/                 # CLI helpers (demo-check, submission bundle)
+├── tests/                   # 61 unit tests
 ├── docs/                    # Hackathon submission materials
+├── Makefile                 # One-command QA/bundle shortcuts
 ├── requirements.txt
 └── CLAUDE.md                # Project architecture document
 ```
@@ -176,7 +213,17 @@ The app opens at `http://localhost:8501`. The simulation engine works fully offl
 pytest tests/ -v
 ```
 
-41 tests covering data loading, network construction, and all 3 contagion models.
+Unit tests cover data loading, network construction, contagion models, control plane, gateway, evaluation, Evidence-RAG, agentic ops, and reporting serialization.
+
+## Demo Reliability & Submission
+
+```bash
+make demo-check
+make submission-bundle
+```
+
+- `make demo-check` runs deterministic smoke checks for the 5 showcase crisis scenarios and writes `artifacts/demo_check_latest.json`.
+- `make submission-bundle` creates a timestamped zip in `artifacts/` with docs, screenshot, and manifest metadata.
 
 ---
 
