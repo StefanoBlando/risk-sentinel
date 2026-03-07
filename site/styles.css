@@ -251,14 +251,6 @@ section {
   color: var(--teal);
 }
 
-.panel-link {
-  display: inline-block;
-  margin-top: 0.78rem;
-  color: var(--blue);
-  text-decoration: none;
-  font-size: 0.86rem;
-}
-
 .hero-metrics {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
