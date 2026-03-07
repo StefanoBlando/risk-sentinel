@@ -139,13 +139,13 @@ The app opens at `http://localhost:8501`. The simulation engine works fully offl
 ### Run (Chainlit chat)
 
 ```bash
-python -m chainlit run chainlit_app.py -w
+python -m chainlit run apps/chainlit/app.py -w
 ```
 
 Optional GPT control-plane mode:
 
 ```bash
-CHAINLIT_USE_GPT=1 python -m chainlit run chainlit_app.py -w
+CHAINLIT_USE_GPT=1 python -m chainlit run apps/chainlit/app.py -w
 ```
 
 ### Deploy on Streamlit Cloud
@@ -186,7 +186,9 @@ CHAINLIT_USE_GPT=1 python -m chainlit run chainlit_app.py -w
 │   ├── reporting.py         # Action pack and JSON-safe reporting payloads
 │   ├── ui_panels.py         # Explainability badges + KPI display helpers
 │   └── app.py               # Streamlit main app
-├── chainlit_app.py          # Chainlit chat app
+├── apps/
+│   └── chainlit/
+│       └── app.py           # Chainlit chat app
 ├── scripts/                 # CLI helpers (demo-check, submission bundle)
 ├── tests/                   # 61 unit tests
 ├── docs/                    # Hackathon submission materials

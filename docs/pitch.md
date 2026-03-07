@@ -43,7 +43,7 @@ RiskSentinel combines network science and multi-agent orchestration:
 
 ## Current Status
 - Core app working on Streamlit.
-- Chainlit chat app available (`chainlit_app.py`).
+- Chainlit chat app available (`apps/chainlit/app.py`).
 - Tests passing: 61.
 
 ## Next Deliverables

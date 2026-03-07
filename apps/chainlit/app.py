@@ -3,10 +3,10 @@
 Deterministic local systemic-risk simulation chat with optional GPT control-plane analysis.
 
 Run:
-  ./venv/bin/python -m chainlit run chainlit_app.py -w
+  ./venv/bin/python -m chainlit run apps/chainlit/app.py -w
 
 Optional GPT mode:
-  CHAINLIT_USE_GPT=1 ./venv/bin/python -m chainlit run chainlit_app.py -w
+  CHAINLIT_USE_GPT=1 ./venv/bin/python -m chainlit run apps/chainlit/app.py -w
 """
 
 from __future__ import annotations
@@ -15,10 +15,16 @@ import asyncio
 import json
 import os
 import re
+import sys
 from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 import chainlit as cl
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.agents.orchestrator import run_parallel_workflow
 from src.core import contagion, data_loader, network
