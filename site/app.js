@@ -27,3 +27,17 @@ document.querySelectorAll(".metric[data-count]").forEach(node => {
 
   requestAnimationFrame(tick);
 });
+
+const statusChip = document.getElementById("status-chip");
+if (statusChip) {
+  const states = [
+    "Control plane ready",
+    "Evidence gate active",
+    "Critic validation online"
+  ];
+  let idx = 0;
+  window.setInterval(() => {
+    idx = (idx + 1) % states.length;
+    statusChip.textContent = states[idx];
+  }, 2400);
+}

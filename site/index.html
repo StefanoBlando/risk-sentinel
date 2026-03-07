@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="./styles.css?v=2" />
+  <link rel="stylesheet" href="./styles.css?v=3" />
 </head>
 <body>
   <div class="bg-glow"></div>
@@ -21,24 +21,49 @@
     </a>
     <nav class="topnav">
       <a href="#architecture">Architecture</a>
-      <a href="#demo">2-Min Demo</a>
+      <a href="#flow">Flow</a>
       <a href="#proof">Proof</a>
+      <a href="#links">Links</a>
       <a class="btn btn-small" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">GitHub</a>
     </nav>
   </header>
 
   <main id="top">
     <section class="hero reveal">
-      <p class="eyebrow">Microsoft AI Dev Days Hackathon 2026</p>
-      <h1>Systemic Risk Intelligence<br />for Real-Time Decisions</h1>
-      <p class="subtitle">
-        Ask <em>"What if JPM crashes 40%?"</em> and get deterministic contagion analytics,
-        agentic synthesis, and audit-ready evidence in one flow.
-      </p>
-      <div class="hero-actions">
-        <a class="btn" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">Open Repository</a>
-        <a class="btn btn-ghost" href="#proof">See KPI Snapshot</a>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">Microsoft AI Dev Days Hackathon 2026</p>
+          <h1>Systemic Risk Intelligence for Real-Time Decisions</h1>
+          <p class="subtitle">
+            Ask <em>"What if JPM crashes 40%?"</em> and get deterministic contagion analytics,
+            bounded agentic synthesis, and audit-ready evidence in one run.
+          </p>
+          <div class="hero-actions">
+            <a class="btn" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">Open Repository</a>
+            <a class="btn btn-ghost" href="#proof">See KPI Snapshot</a>
+          </div>
+          <div class="hero-tags">
+            <span>Control Plane Hard Gate</span>
+            <span>Evidence Ledger E1..En</span>
+            <span>Judge KPI Dashboard</span>
+          </div>
+        </div>
+
+        <aside class="hero-panel">
+          <p class="panel-label">Live run status</p>
+          <p class="panel-status" id="status-chip">Control plane ready</p>
+          <div class="terminal">
+            <p><span>&gt;</span> What if JPM crashes 40% on 2025-12-01?</p>
+            <p><span>&gt;</span> Planner -> Architect + Quant -> Advisor -> Critic</p>
+            <p><span>&gt;</span> Cascade depth: 6 | Affected: 152 | Avg stress: 23.8%</p>
+            <p><span>&gt;</span> Verdict: Approved with deterministic evidence</p>
+          </div>
+          <a class="panel-link" href="https://github.com/stefano-blando/risk-sentinel/actions/workflows/pages.yml" target="_blank" rel="noreferrer">
+            Pages deploy workflow
+          </a>
+        </aside>
       </div>
+
       <div class="hero-metrics">
         <article>
           <span class="metric" data-count="210">210</span>
@@ -63,7 +88,7 @@
       <img src="./assets/risksentinel.jpg" alt="RiskSentinel dashboard screenshot" />
     </section>
 
-    <section id="architecture" class="cards reveal">
+    <section id="architecture" class="reveal">
       <div class="section-head">
         <p class="eyebrow">Architecture</p>
         <h2>Deterministic Core + Bounded Agentic Layer</h2>
@@ -71,46 +96,73 @@
       <div class="card-grid">
         <article class="card">
           <h3>Control Plane</h3>
-          <p>Explicit state machine: <code>received → local_facts → analysis → critic → finalize</code>.</p>
+          <p>State machine routing with strict transitions and fallback policy.</p>
         </article>
         <article class="card">
           <h3>Tool Gateway</h3>
-          <p>Single deterministic gate with timeout, retries, schema validation, and error taxonomy.</p>
+          <p>Timeout, retry, schema validation, and error taxonomy in one deterministic gate.</p>
         </article>
         <article class="card">
           <h3>Evidence First</h3>
-          <p>Immutable evidence ledger (<code>E1..En</code>) + RAG context + critic hard gate (max 1 repair).</p>
+          <p>Immutable references (<code>E1..En</code>) plus retrieval context (<code>R1..Rn</code>).</p>
         </article>
         <article class="card">
           <h3>Agentic Ops</h3>
-          <p>Scenario Commander, Autonomous Stress Test, and Portfolio Co-Pilot for judge-ready flows.</p>
+          <p>Scenario Commander, Autonomous Stress Test, Portfolio Co-Pilot.</p>
         </article>
       </div>
     </section>
 
-    <section id="demo" class="timeline reveal">
+    <section id="flow" class="reveal">
       <div class="section-head">
-        <p class="eyebrow">Live Narrative</p>
-        <h2>Two-Minute Demo Script</h2>
+        <p class="eyebrow">Execution Flow</p>
+        <h2>Judge-Friendly and Auditable by Design</h2>
       </div>
-      <ol>
-        <li><strong>0:00-0:15</strong> Hook with a shock question (JPM -40%).</li>
-        <li><strong>0:15-0:45</strong> Show deterministic cascade: nodes, waves, sector stress.</li>
-        <li><strong>0:45-1:20</strong> Run control-plane flow (Planner → Architect+Quant → Advisor → Critic).</li>
-        <li><strong>1:20-1:45</strong> Open explainability + judge KPIs (pass-rate, consistency, p95 latency).</li>
-        <li><strong>1:45-2:00</strong> Export submission bundle and close with resilience fallback.</li>
-      </ol>
+      <div class="flow-row">
+        <div class="flow-step">received</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">local_facts</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">analysis</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">critic</div>
+        <div class="flow-arrow">→</div>
+        <div class="flow-step">finalize</div>
+      </div>
+
+      <div class="demo-steps">
+        <article>
+          <h3>0:00-0:15</h3>
+          <p>Hook with a direct shock question (JPM -40%).</p>
+        </article>
+        <article>
+          <h3>0:15-0:45</h3>
+          <p>Deterministic cascade: affected nodes, waves, stress.</p>
+        </article>
+        <article>
+          <h3>0:45-1:20</h3>
+          <p>Planner -> Architect+Quant -> Advisor -> Critic.</p>
+        </article>
+        <article>
+          <h3>1:20-1:45</h3>
+          <p>Explainability and KPI panel for judges.</p>
+        </article>
+        <article>
+          <h3>1:45-2:00</h3>
+          <p>Export bundle and close with fallback resilience.</p>
+        </article>
+      </div>
     </section>
 
-    <section id="proof" class="proof reveal">
+    <section id="proof" class="reveal">
       <div class="section-head">
         <p class="eyebrow">Proof Of Reliability</p>
-        <h2>What Judges Can Verify Quickly</h2>
+        <h2>What Judges Can Verify In Seconds</h2>
       </div>
       <div class="proof-grid">
         <article>
           <h3>Testing</h3>
-          <p><code>61 passed</code> with coverage across contagion, control plane, gateway, evaluation, RAG, reporting.</p>
+          <p><code>61 passed</code> across contagion, control plane, gateway, evaluation, RAG, reporting.</p>
         </article>
         <article>
           <h3>Smoke Checks</h3>
@@ -118,28 +170,36 @@
         </article>
         <article>
           <h3>Submission Bundle</h3>
-          <p><code>make submission-bundle</code> generates zip + manifest for reproducible packaging.</p>
+          <p><code>make submission-bundle</code> creates zip + manifest metadata for reproducibility.</p>
         </article>
       </div>
     </section>
 
-    <section class="links reveal">
+    <section id="links" class="reveal">
       <div class="section-head">
         <p class="eyebrow">Submission Links</p>
-        <h2>Ready To Publish</h2>
+        <h2>Everything In One Place</h2>
       </div>
       <div class="link-cards">
         <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">
           <h3>Repository</h3>
-          <p>Code, architecture docs, tests, and setup.</p>
+          <p>Codebase, architecture, tests, quickstart.</p>
+        </a>
+        <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel/blob/main/docs/pitch.md" target="_blank" rel="noreferrer">
+          <h3>Pitch Doc</h3>
+          <p>Problem, novelty, architecture, impact.</p>
+        </a>
+        <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel/blob/main/docs/demo_script.md" target="_blank" rel="noreferrer">
+          <h3>Demo Script</h3>
+          <p>2-minute script with fallback plan.</p>
         </a>
         <a class="link-card link-placeholder" href="#" aria-disabled="true">
-          <h3>Live Demo</h3>
-          <p>Add your public Streamlit URL before submission.</p>
+          <h3>Live Demo URL</h3>
+          <p>Insert your public Streamlit link before final submission.</p>
         </a>
         <a class="link-card link-placeholder" href="#" aria-disabled="true">
-          <h3>Video Demo</h3>
-          <p>Add your public 2-minute video URL.</p>
+          <h3>Video URL</h3>
+          <p>Insert your final public 2-minute video link.</p>
         </a>
       </div>
     </section>
@@ -149,6 +209,6 @@
     <p>Built by Stefano Blando · RiskSentinel · 2026</p>
   </footer>
 
-  <script src="./app.js?v=2"></script>
+  <script src="./app.js?v=3"></script>
 </body>
 </html>
