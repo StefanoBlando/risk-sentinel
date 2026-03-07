@@ -167,6 +167,15 @@ python -m http.server 8080 --directory site
 
 Open `http://localhost:8080`.
 
+GitHub Pages (auto-deploy from `main`):
+
+- Workflow: `.github/workflows/pages.yml`
+- Expected URL: `https://stefano-blando.github.io/risk-sentinel/`
+- First-time setup on GitHub:
+1. `Settings -> Pages`
+2. `Build and deployment -> Source: GitHub Actions`
+3. Save and rerun the latest `Deploy Site to GitHub Pages` workflow if needed
+
 ---
 
 ## Project Structure
