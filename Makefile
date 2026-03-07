@@ -1,6 +1,6 @@
 PYTHON ?= ./venv/bin/python
 
-.PHONY: test demo-check submission-bundle
+.PHONY: test demo-check submission-bundle submission-audit
 
 test:
 	$(PYTHON) -m pytest -q
@@ -10,3 +10,6 @@ demo-check:
 
 submission-bundle: demo-check
 	$(PYTHON) scripts/build_submission_bundle.py --output-dir artifacts
+
+submission-audit:
+	$(PYTHON) scripts/submission_audit.py --output artifacts/submission_audit_latest.json

@@ -240,10 +240,12 @@ Unit tests cover data loading, network construction, contagion models, control p
 ```bash
 make demo-check
 make submission-bundle
+make submission-audit
 ```
 
 - `make demo-check` runs deterministic smoke checks for the 5 showcase crisis scenarios and writes `artifacts/demo_check_latest.json`.
 - `make submission-bundle` creates a timestamped zip in `artifacts/` with docs, screenshot, and manifest metadata.
+- `make submission-audit` verifies blockers (missing public links, missing artifacts, dirty tree) and writes `artifacts/submission_audit_latest.json`.
 
 ---
 
