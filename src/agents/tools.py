@@ -330,4 +330,4 @@ ADVISOR_TOOLS = [
     get_market_regime,
 ]
 
-ALL_TOOLS = list(set(ARCHITECT_TOOLS + QUANT_TOOLS + ADVISOR_TOOLS))
+ALL_TOOLS = list(dict.fromkeys(ARCHITECT_TOOLS + QUANT_TOOLS + ADVISOR_TOOLS))

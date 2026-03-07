@@ -3,20 +3,16 @@ RiskSentinel — Orchestrator
 Two modes:
 1. Workflow mode: sequential pipeline Architect → Quant → Advisor (for full scenarios)
 2. Single-agent mode: route to one agent based on query type (for quick questions)
-3. Parallel workflow mode: Architect + Quant in parallel, then Advisor + Critic
+3. Control-plane workflow mode: deterministic state machine + Planner/Workers/Critic
 
 Uses Microsoft Agent Framework's agent-as-tool pattern for composition.
 """
 
-import asyncio
-import json
-import re
-from typing import Optional
-
-from .architect import create_architect_agent, ARCHITECT_INSTRUCTIONS
-from .advisor import create_advisor_agent, ADVISOR_INSTRUCTIONS
-from .critic import create_critic_agent, CRITIC_INSTRUCTIONS
-from .simulator import create_quant_agent, QUANT_INSTRUCTIONS
+from .architect import create_architect_agent
+from .advisor import create_advisor_agent
+from .critic import create_critic_agent
+from .simulator import create_quant_agent
+from .control_plane import RoleModelRouter, run_control_plane_workflow
 from .tools import ALL_TOOLS
 
 # ---------------------------------------------------------------------------
@@ -188,154 +184,27 @@ async def run_query(agent, query: str) -> str:
     return result.text
 
 
-def _extract_json_dict(text: str) -> dict:
-    text = text.strip()
-    candidates = [text]
-    fence = re.search(r"```(?:json)?\s*(\{[\s\S]*\})\s*```", text, re.IGNORECASE)
-    if fence:
-        candidates.append(fence.group(1).strip())
-    obj = re.search(r"(\{[\s\S]*\})", text)
-    if obj:
-        candidates.append(obj.group(1).strip())
-    for raw in candidates:
-        try:
-            val = json.loads(raw)
-            if isinstance(val, dict):
-                return val
-        except Exception:
-            continue
-    return {}
-
-
-def _clip(text: str, limit: int = 4000) -> str:
-    return text if len(text) <= limit else text[:limit] + " ..."
-
-
 async def run_parallel_workflow(client, query: str, timeout_sec: int = 45) -> str:
-    """Run explicit multi-agent workflow with parallel Architect/Quant + Critic validation."""
-    architect = create_architect_agent(client)
-    quant = create_quant_agent(client)
-    advisor = create_advisor_agent(client)
-    critic = create_critic_agent(client)
+    """Run control-plane workflow with explicit state machine and critic hard gate."""
+    try:
+        from src.utils.azure_config import get_agent_framework_chat_client, get_settings
 
-    architect_prompt = (
-        "Analyze network context for this request. Focus on regime, topology, connections, and cross-sector channels.\n"
-        f"Request: {query}"
-    )
-    quant_prompt = (
-        "Run contagion simulation relevant to this request. Focus on cascade depth, affected nodes, stress tiers, sectors.\n"
-        f"Request: {query}"
-    )
-
-    architect_task = asyncio.create_task(run_query(architect, architect_prompt))
-    quant_task = asyncio.create_task(run_query(quant, quant_prompt))
-    architect_out, quant_out = await asyncio.wait_for(
-        asyncio.gather(architect_task, quant_task), timeout=timeout_sec
-    )
-
-    advisor_prompt = (
-        "Synthesize this analysis into strict JSON schema v1 only.\n"
-        "Use only values from provided evidence and keep uncertainty explicit.\n\n"
-        f"User request:\n{query}\n\n"
-        f"Architect evidence:\n{_clip(architect_out)}\n\n"
-        f"Quant evidence:\n{_clip(quant_out)}"
-    )
-    advisor_out = await asyncio.wait_for(run_query(advisor, advisor_prompt), timeout=timeout_sec)
-
-    critic_prompt = (
-        "Audit candidate output against evidence and return strict JSON validation payload.\n\n"
-        f"User request:\n{query}\n\n"
-        f"Evidence (Architect):\n{_clip(architect_out)}\n\n"
-        f"Evidence (Quant):\n{_clip(quant_out)}\n\n"
-        f"Candidate output:\n{_clip(advisor_out)}"
-    )
-    critic_out = await asyncio.wait_for(run_query(critic, critic_prompt), timeout=min(timeout_sec, 30))
-    critic_json = _extract_json_dict(critic_out)
-    advisor_json = _extract_json_dict(advisor_out)
-
-    if critic_json and not bool(critic_json.get("approved", True)):
-        revision_prompt = (
-            "Revise the candidate JSON output using critic feedback. Return strict JSON schema v1 only.\n\n"
-            f"Original user request:\n{query}\n\n"
-            f"Original advisor output:\n{_clip(advisor_out)}\n\n"
-            f"Critic feedback:\n{json.dumps(critic_json, indent=2)}\n\n"
-            f"Architect evidence:\n{_clip(architect_out)}\n\n"
-            f"Quant evidence:\n{_clip(quant_out)}"
+        settings = get_settings()
+        router = RoleModelRouter(
+            planner=settings.AZURE_OPENAI_FALLBACK_DEPLOYMENT,
+            worker=settings.AZURE_OPENAI_FALLBACK_DEPLOYMENT,
+            advisor=settings.AZURE_OPENAI_DEPLOYMENT,
+            critic=settings.AZURE_OPENAI_FALLBACK_DEPLOYMENT,
         )
-        revised_out = await asyncio.wait_for(run_query(advisor, revision_prompt), timeout=timeout_sec)
-        revised_json = _extract_json_dict(revised_out)
-        if revised_json:
-            advisor_json = revised_json
-            recheck_prompt = (
-                "Audit candidate output against evidence and return strict JSON validation payload.\n\n"
-                f"User request:\n{query}\n\n"
-                f"Evidence (Architect):\n{_clip(architect_out)}\n\n"
-                f"Evidence (Quant):\n{_clip(quant_out)}\n\n"
-                f"Candidate output:\n{json.dumps(revised_json)}"
-            )
-            recheck_out = await asyncio.wait_for(run_query(critic, recheck_prompt), timeout=min(timeout_sec, 20))
-            critic_json = _extract_json_dict(recheck_out) or critic_json
-        else:
-            advisor_out = revised_out
-
-    if advisor_json:
-        critic_approved = bool(critic_json.get("approved", False)) if critic_json else False
-        if not critic_approved:
-            hard_fail = {
-                "schema_version": "v1",
-                "situation": ["Critic gate blocked final output due evidence inconsistency."],
-                "quant_results": [
-                    "Advisor output was rejected by validation.",
-                    "Use deterministic local output or retry with simplified prompt.",
-                ],
-                "risk_rating": "ELEVATED",
-                "actions": ["Re-run with narrower scope and deterministic facts only."],
-                "monitoring_triggers": ["Critic issues resolved and approval=true."],
-                "evidence_used": ["architect_output", "quant_output", "critic_output"],
-                "notes": json.dumps(critic_json),
-                "insufficient_data": True,
-                "uncertainty_score": 0.8,
-                "confidence_reason": "Critic did not approve candidate JSON.",
-                "validation": {
-                    "critic_approved": False,
-                    "critic_issues": critic_json.get("issues", []) if critic_json else [],
-                    "required_fixes": critic_json.get("required_fixes", []) if critic_json else [],
-                },
-            }
-            return json.dumps(hard_fail)
-
-        advisor_json.setdefault("schema_version", "v1")
-        advisor_json["validation"] = {
-            "critic_approved": critic_approved,
-            "critic_issues": critic_json.get("issues", []) if critic_json else [],
-            "required_fixes": critic_json.get("required_fixes", []) if critic_json else [],
-            "uncertainty_score": critic_json.get("uncertainty_score"),
-            "confidence_reason": critic_json.get("confidence_reason"),
-        }
-        if "uncertainty_score" not in advisor_json and critic_json.get("uncertainty_score") is not None:
-            advisor_json["uncertainty_score"] = critic_json.get("uncertainty_score")
-        if "confidence_reason" not in advisor_json and critic_json.get("confidence_reason"):
-            advisor_json["confidence_reason"] = critic_json.get("confidence_reason")
-        return json.dumps(advisor_json)
-
-    # Fallback when advisor output is not strict JSON.
-    fallback = {
-        "schema_version": "v1",
-        "situation": ["Parallel workflow completed but structured synthesis failed."],
-        "quant_results": [
-            "Architect and Quant agents executed in parallel.",
-            "Advisor output was not valid JSON; using fallback payload.",
-        ],
-        "risk_rating": "ELEVATED",
-        "actions": ["Re-run with simpler prompt or strict schema enforcement."],
-        "monitoring_triggers": ["Check validation issues in notes."],
-        "evidence_used": ["architect_output", "quant_output", "critic_output"],
-        "notes": f"advisor_unstructured={_clip(advisor_out, 280)} | critic={_clip(critic_out, 280)}",
-        "insufficient_data": True,
-        "uncertainty_score": 0.75,
-        "confidence_reason": "Structured synthesis failed validation.",
-    }
-    return json.dumps(fallback)
+        return await run_control_plane_workflow(
+            client,
+            query,
+            timeout_sec=timeout_sec,
+            client_factory=lambda dep: get_agent_framework_chat_client(deployment_name=dep),
+            model_router=router,
+        )
+    except Exception:
+        return await run_control_plane_workflow(client, query, timeout_sec=timeout_sec)
 
 
 async def run_full_scenario(client, ticker: str, shock_pct: int, date: str = "2025-12-01") -> str:

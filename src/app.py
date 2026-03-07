@@ -11,6 +11,7 @@ import time
 import json
 import os
 import hmac
+import hashlib
 import io
 import zipfile
 from datetime import datetime, timezone
@@ -33,7 +34,16 @@ from src.agents.orchestrator import (
     run_parallel_workflow,
 )
 from src.agents.critic import create_critic_agent
+from src.agents.evaluation import EvalSample, evaluate_samples
+from src.agents.evidence_rag import (
+    build_crisis_evidence_docs,
+    build_history_evidence_docs,
+    format_evidence_block,
+    retrieve_evidence,
+    serialize_retrieved,
+)
 from src.core import data_loader, network, contagion
+from src import agentic_ops, reporting, ui_panels
 from src.utils.azure_config import (
     get_agent_framework_chat_client,
     get_openai_client,
@@ -51,41 +61,164 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
+# THEME TOKENS
+# ---------------------------------------------------------------------------
+PALETTE = {
+    "bg_main": "#070b14",
+    "surface_0": "#0f172a",
+    "surface_1": "#131f37",
+    "surface_2": "#1a2744",
+    "border": "#223555",
+    "text_primary": "#e5edf9",
+    "text_muted": "#9fb0cc",
+    "accent_cool": "#38bdf8",
+    "accent_blue": "#60a5fa",
+    "accent_warm": "#fb923c",
+    "accent_hot": "#ef4444",
+    "success": "#22c55e",
+    "warning": "#fbbf24",
+    "elevated": "#f97316",
+    "danger": "#f87171",
+}
+
+AGENT_BORDER_COLORS = {
+    "architect": PALETTE["accent_cool"],
+    "quant": PALETTE["accent_warm"],
+    "advisor": "#34d399",
+    "sentinel": "#c084fc",
+}
+
+RISK_COLORS = {
+    "critical": "#ef4444",
+    "high": "#f97316",
+    "moderate": "#fbbf24",
+    "low": PALETTE["accent_cool"],
+    "none": "#64748b",
+}
+
+MODEL_COLORS = {
+    "Linear Threshold": PALETTE["accent_cool"],
+    "Debtrank": PALETTE["accent_warm"],
+    "Cascade Removal": AGENT_BORDER_COLORS["sentinel"],
+}
+
+PLOT_EDGE_BG = "rgba(73, 95, 132, 0.28)"
+PLOT_EDGE_STRESS = "rgba(249, 115, 22, 0.46)"
+PLOT_EVENT_FILL = "rgba(239, 68, 68, 0.12)"
+PLOTLY_STRESS_COLORSCALE = [
+    [0.0, PALETTE["accent_cool"]],
+    [0.4, PALETTE["warning"]],
+    [0.7, PALETTE["accent_warm"]],
+    [1.0, PALETTE["accent_hot"]],
+]
+
+# ---------------------------------------------------------------------------
 # CSS
 # ---------------------------------------------------------------------------
-st.markdown("""
+st.markdown(f"""
 <style>
-    .stApp { background-color: #0e1117; }
-    .agent-msg {
-        background: #1a1f2e;
+    :root {{
+        --bg-main: {PALETTE["bg_main"]};
+        --surface-0: {PALETTE["surface_0"]};
+        --surface-1: {PALETTE["surface_1"]};
+        --surface-2: {PALETTE["surface_2"]};
+        --border-subtle: {PALETTE["border"]};
+        --text-primary: {PALETTE["text_primary"]};
+        --text-muted: {PALETTE["text_muted"]};
+        --accent-cool: {PALETTE["accent_cool"]};
+        --accent-blue: {PALETTE["accent_blue"]};
+        --accent-warm: {PALETTE["accent_warm"]};
+        --accent-hot: {PALETTE["accent_hot"]};
+    }}
+    .stApp {{
+        background:
+            radial-gradient(circle at 10% -10%, rgba(56, 189, 248, 0.18) 0%, transparent 35%),
+            radial-gradient(circle at 90% 12%, rgba(251, 146, 60, 0.10) 0%, transparent 32%),
+            var(--bg-main);
+        color: var(--text-primary);
+    }}
+    [data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, var(--surface-0) 0%, #101b30 100%);
+        border-right: 1px solid var(--border-subtle);
+    }}
+    [data-testid="stSidebar"] * {{
+        color: var(--text-primary);
+    }}
+    .stTabs [data-baseweb="tab-list"] {{
+        gap: 0.35rem;
+    }}
+    .stTabs [data-baseweb="tab"] {{
+        background: var(--surface-0);
+        border: 1px solid var(--border-subtle);
+        border-bottom: none;
+        border-radius: 10px 10px 0 0;
+        color: var(--text-muted);
+    }}
+    .stTabs [aria-selected="true"] {{
+        background: linear-gradient(90deg, #16305d 0%, #1c3f79 100%);
+        color: var(--text-primary);
+        border-color: #355c97;
+    }}
+    div[data-testid="stMetric"] {{
+        background: var(--surface-1);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        padding: 10px 12px;
+    }}
+    div[data-testid="stMetricLabel"], div[data-testid="stMetricDelta"] {{
+        color: var(--text-muted);
+    }}
+    div[data-testid="stMetricValue"] {{
+        color: var(--text-primary);
+    }}
+    .stButton > button, .stDownloadButton > button {{
+        border: 1px solid var(--border-subtle);
+        border-radius: 10px;
+        background: var(--surface-1);
+        color: var(--text-primary);
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover {{
+        border-color: var(--accent-blue);
+        background: #192949;
+        color: #ffffff;
+    }}
+    .stExpander {{
+        border: 1px solid var(--border-subtle) !important;
+        border-radius: 10px !important;
+    }}
+    .agent-msg {{
+        background: var(--surface-1);
+        border: 1px solid var(--border-subtle);
         border-left: 3px solid;
         border-radius: 0 8px 8px 0;
         padding: 12px 16px;
         margin: 8px 0;
         font-size: 14px;
-    }
-    .agent-architect { border-color: #4fc3f7; }
-    .agent-quant { border-color: #ff8a65; }
-    .agent-advisor { border-color: #81c784; }
-    .agent-sentinel { border-color: #ce93d8; }
-    .risk-low { color: #00d26a; }
-    .risk-moderate { color: #ffc107; }
-    .risk-elevated { color: #ff8c00; }
-    .risk-high { color: #ff4444; }
-    .risk-critical { color: #ff0000; font-weight: bold; }
-    .main-header {
-        background: linear-gradient(90deg, #1a237e 0%, #0d47a1 50%, #01579b 100%);
+    }}
+    .agent-architect {{ border-color: {AGENT_BORDER_COLORS["architect"]}; }}
+    .agent-quant {{ border-color: {AGENT_BORDER_COLORS["quant"]}; }}
+    .agent-advisor {{ border-color: {AGENT_BORDER_COLORS["advisor"]}; }}
+    .agent-sentinel {{ border-color: {AGENT_BORDER_COLORS["sentinel"]}; }}
+    .risk-low {{ color: {PALETTE["success"]}; }}
+    .risk-moderate {{ color: {PALETTE["warning"]}; }}
+    .risk-elevated {{ color: {PALETTE["elevated"]}; }}
+    .risk-high {{ color: {PALETTE["danger"]}; }}
+    .risk-critical {{ color: {RISK_COLORS["critical"]}; font-weight: bold; }}
+    .main-header {{
+        background: linear-gradient(110deg, #123568 0%, #1a4f92 45%, #0f6ea2 100%);
+        border: 1px solid #2a5d99;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.25);
         padding: 20px 30px;
         border-radius: 12px;
         margin-bottom: 20px;
-    }
-    .sector-dot {
+    }}
+    .sector-dot {{
         display: inline-block; width: 10px; height: 10px;
         border-radius: 50%; margin-right: 6px;
-    }
-    .crisis-btn button {
+    }}
+    .crisis-btn button {{
         font-size: 12px !important;
-    }
+    }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,6 +320,25 @@ WORKFLOW_TRANSITIONS = {
 MAX_COMPARE_TICKERS = 12
 CACHE_SEMANTIC_MIN_SCORE = 0.55
 CIRCUIT_COOLDOWN_SEC = 90
+AUTONOMOUS_SHOCK_GRID = [30, 50, 70]
+DEFAULT_COMMANDER_TOP_N = 5
+DEFAULT_AUTONOMOUS_SEEDS = 10
+AGENTIC_OP_TIMEOUT_SEC = 25
+AGENTIC_CACHE_TTL_SEC = 600
+SECTOR_HEDGE_MAP = {
+    "Information Technology": "XLK",
+    "Health Care": "XLV",
+    "Financials": "XLF",
+    "Consumer Discretionary": "XLY",
+    "Communication Services": "XLC",
+    "Industrials": "XLI",
+    "Consumer Staples": "XLP",
+    "Energy": "XLE",
+    "Utilities": "XLU",
+    "Real Estate": "XLRE",
+    "Materials": "XLB",
+}
+PORTFOLIO_SAMPLE = "JPM,0.25\nGS,0.20\nXOM,0.15\nNVDA,0.20\nUNH,0.20"
 QUERY_TOKEN_STOPWORDS = {
     "what", "happens", "happen", "if", "the", "and", "for", "with", "from",
     "then", "that", "this", "into", "using", "include", "between", "compare",
@@ -247,10 +399,32 @@ defaults = {
     "gpt_fail_streak": 0,
     "gpt_circuit_open_until": 0.0,
     "run_cancel_requested": False,
+    "rag_last_docs": [],
+    "judge_kpis": {},
+    "critic_auto_repair": True,
+    "use_session_memory": True,
+    "session_decisions": [],
+    "commander_results": None,
+    "autonomous_results": None,
+    "portfolio_text": "",
+    "auto_portfolio_n": 5,
+    "portfolio_copilot": None,
+    "latest_policy_plan": [],
+    "latest_executor_log": [],
+    "last_agentic_action": "",
+    "agentic_ops_cache": {},
+    "full_demo_last_run": None,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
+
+AUTO_BUILD_ON_START = os.getenv("AUTO_BUILD_ON_START", "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 if st.session_state.sector_dict is None or st.session_state.tickers is None:
     try:
@@ -414,6 +588,52 @@ def get_global_gpt_rate_bucket() -> dict:
 
 def _prune_events(events: list[float], now_ts: float, window_sec: int = 60) -> list[float]:
     return [ts for ts in events if (now_ts - ts) <= window_sec]
+
+
+def _agentic_cache_key(op_name: str, **kwargs) -> str:
+    raw = json.dumps({"op": op_name, **kwargs}, sort_keys=True, default=str)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _run_agentic_operation(
+    *,
+    op_name: str,
+    cache_key: str,
+    fn: Callable[[], dict],
+    timeout_sec: int = AGENTIC_OP_TIMEOUT_SEC,
+    ttl_sec: int = AGENTIC_CACHE_TTL_SEC,
+) -> tuple[dict, bool]:
+    """Run deterministic agentic op with timeout + session cache."""
+    now = time.time()
+    cache = st.session_state.agentic_ops_cache
+    row = cache.get(cache_key)
+    if isinstance(row, dict) and (now - float(row.get("ts", 0.0))) <= ttl_sec:
+        return dict(row.get("data", {})), True
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(fn)
+        try:
+            result = future.result(timeout=max(3, int(timeout_sec)))
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            return {
+                "ok": False,
+                "error": f"{op_name} timed out after {timeout_sec}s",
+                "timeout": True,
+            }, False
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }, False
+
+    if not isinstance(result, dict):
+        result = {"ok": False, "error": f"{op_name} returned non-dict payload"}
+    if "ok" not in result:
+        result["ok"] = True
+    cache[cache_key] = {"ts": now, "data": result}
+    st.session_state.agentic_ops_cache = cache
+    return result, False
 
 
 def _tokenize_query(query: str) -> set[str]:
@@ -741,56 +961,15 @@ def choose_execution_policy(
     selected_strategy: str,
 ) -> dict:
     """Deterministic routing policy for local/GPT paths."""
-    route = "local_only"
-    reason = []
-
-    if not in_scope:
-        route = "guardrail_block"
-        reason.append("out_of_scope")
-    elif parsed and (not agent_mode or not access_allowed):
-        route = "local_only"
-        reason.append("agent_disabled_or_locked")
-    elif parsed and not complex_query and not gpt_for_parseable_queries:
-        route = "local_fast_mode"
-        reason.append("parseable_local_fast")
-    elif agent_mode and access_allowed:
-        route = "gpt"
-        reason.append("gpt_enabled")
-    elif not parsed:
-        route = "parse_failed"
-        reason.append("unparseable_without_gpt")
-
-    effective_strategy = selected_strategy
-    compare_intent = bool(parsed and len(parsed.get("tickers", [])) >= 2 and complex_query)
-    if route == "gpt":
-        if compare_intent:
-            effective_strategy = "commentary_direct"
-        elif complex_query and selected_strategy in {"orchestrator", "workflow_parallel"}:
-            effective_strategy = "workflow_parallel"
-        elif (not complex_query) and selected_strategy == "workflow_parallel":
-            effective_strategy = "simple"
-        elif selected_strategy not in {"simple", "orchestrator", "workflow_parallel"}:
-            effective_strategy = "simple"
-
-    if effective_strategy == "workflow_parallel":
-        timeout_sec = 28
-        max_retries = 0
-    elif effective_strategy == "orchestrator":
-        timeout_sec = 20
-        max_retries = 0
-    else:
-        timeout_sec = 18
-        max_retries = 1
-
-    return {
-        "route": route,
-        "run_local_first": bool(parsed),
-        "should_run_gpt": route == "gpt",
-        "effective_strategy": effective_strategy,
-        "timeout_sec": timeout_sec,
-        "max_retries": max_retries,
-        "reason": ", ".join(reason) if reason else "default",
-    }
+    return agentic_ops.choose_execution_policy(
+        parsed=parsed,
+        complex_query=complex_query,
+        in_scope=in_scope,
+        agent_mode=agent_mode,
+        gpt_for_parseable_queries=gpt_for_parseable_queries,
+        access_allowed=access_allowed,
+        selected_strategy=selected_strategy,
+    )
 
 
 def extract_json_payload(text: str) -> dict | None:
@@ -929,9 +1108,16 @@ def build_memory_hint(query: str, history: list[dict], top_k: int = 2) -> str:
     return "\n".join(lines)
 
 
-def build_structured_prompt(user_query: str, facts_plain: str, risk_profile: str, memory_hint: str = "") -> str:
+def build_structured_prompt(
+    user_query: str,
+    facts_plain: str,
+    risk_profile: str,
+    memory_hint: str = "",
+    rag_context: str = "",
+) -> str:
     profile_hint = RISK_PROFILE_GUIDANCE.get(risk_profile, RISK_PROFILE_GUIDANCE["balanced"])
     memory_block = f"Episodic memory hints:\n{memory_hint}\n\n" if memory_hint else ""
+    rag_block = f"Retrieved evidence context (RAG):\n{rag_context}\n\n" if rag_context else ""
     schema = (
         '{'
         '"schema_version":"v1",'
@@ -956,13 +1142,204 @@ def build_structured_prompt(user_query: str, facts_plain: str, risk_profile: str
         "- Keep each list concise (max 4 items).\n",
         "- Return uncertainty_score between 0.0 and 1.0.\n",
         f"- Risk profile to optimize for: {risk_profile} ({profile_hint})\n",
+        "- If RAG context is used, cite R# references in evidence_used and notes.\n",
         "- If facts are insufficient, set insufficient_data=true and explain in notes.\n\n",
         f"Deterministic facts:\n{facts_plain}\n\n",
     ]
     if memory_block:
         parts.append(memory_block)
+    if rag_block:
+        parts.append(rag_block)
     parts.append(f"User request:\n{user_query}")
     return "".join(parts)
+
+
+def build_policy_plan(
+    *,
+    query: str,
+    parsed: dict | None,
+    compare_query: bool,
+    in_scope: bool,
+    execution_policy: dict,
+    selected_date: str,
+    threshold: float,
+    model_for_query: str,
+) -> list[str]:
+    """Deterministic planner output (Policy role) shown in explainability."""
+    return agentic_ops.build_policy_plan(
+        query=query,
+        parsed=parsed,
+        compare_query=compare_query,
+        in_scope=in_scope,
+        execution_policy=execution_policy,
+        selected_date=selected_date,
+        threshold=threshold,
+        model_for_query=model_for_query,
+        max_compare_tickers=MAX_COMPARE_TICKERS,
+    )
+
+
+def summarize_executor_log(events: list[dict], limit: int = 18) -> list[dict]:
+    """Compact executor timeline from trace events."""
+    return agentic_ops.summarize_executor_log(events, limit=limit)
+
+
+def remember_session_decision(query: str, trace: dict) -> None:
+    """Store concise session memory record for next runs."""
+    result = trace.get("result", {}) if isinstance(trace, dict) else {}
+    policy = trace.get("policy", {}) if isinstance(trace, dict) else {}
+    entry = {
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "query": query[:220],
+        "state": result.get("state", "n/a"),
+        "risk_profile": policy.get("risk_profile", st.session_state.risk_profile),
+        "route": (policy.get("router") or {}).get("route", "n/a") if isinstance(policy.get("router"), dict) else "n/a",
+        "critic_approved": result.get("critic_approved"),
+        "uncertainty_score": result.get("uncertainty_score"),
+    }
+    mem = list(st.session_state.session_decisions or [])
+    mem.append(entry)
+    st.session_state.session_decisions = mem[-40:]
+
+
+def build_session_decision_hint(query: str, top_k: int = 2) -> str:
+    """Semantic hint from recent decisions in this Streamlit session."""
+    records = st.session_state.session_decisions or []
+    if not records:
+        return ""
+    q_tokens = _tokenize_query(query)
+    scored: list[tuple[float, dict]] = []
+    for row in records:
+        prev_q = str(row.get("query", ""))
+        prev_tokens = _tokenize_query(prev_q)
+        score = _jaccard_similarity(q_tokens, prev_tokens)
+        if score > 0:
+            scored.append((score, row))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    lines = []
+    for _, row in scored[:top_k]:
+        lines.append(
+            f"- memory_query='{row.get('query', '')[:80]}' | state={row.get('state')} | "
+            f"risk_profile={row.get('risk_profile')} | critic_approved={row.get('critic_approved')}"
+        )
+    return "\n".join(lines)
+
+
+def score_shock_summary(summary: dict, total_nodes: int) -> float:
+    """Unified 0-100 stress score for commander/autonomous ranking."""
+    return agentic_ops.score_shock_summary(summary, total_nodes)
+
+
+def _build_graph_for_analysis(date_str: str, threshold: float) -> tuple[nx.Graph, str, dict, str, float]:
+    return agentic_ops._build_graph_for_analysis(
+        date_str=date_str,
+        threshold=threshold,
+        sector_dict=st.session_state.sector_dict,
+        data_loader_mod=data_loader,
+        network_mod=network,
+    )
+
+
+def run_scenario_commander(
+    *,
+    date_str: str,
+    threshold: float,
+    shock_pct: int,
+    model: str,
+    top_n: int = DEFAULT_COMMANDER_TOP_N,
+    sector_dict: dict[str, str] | None = None,
+) -> dict:
+    """Agentic multi-scenario commander: picks top systemic nodes and ranks outcomes."""
+    sector_data = st.session_state.get("sector_dict") if sector_dict is None else sector_dict
+    return agentic_ops.run_scenario_commander(
+        date_str=date_str,
+        threshold=threshold,
+        shock_pct=shock_pct,
+        model=model,
+        top_n=top_n,
+        sector_dict=sector_data or {},
+        data_loader_mod=data_loader,
+        network_mod=network,
+        contagion_mod=contagion,
+    )
+
+
+def run_autonomous_stress_test(
+    *,
+    date_str: str,
+    threshold: float,
+    model: str = "debtrank",
+    shock_grid: list[int] | None = None,
+    max_seeds: int = DEFAULT_AUTONOMOUS_SEEDS,
+    sector_dict: dict[str, str] | None = None,
+) -> dict:
+    """Autonomous mode: explore hidden fragilities without user choosing target ticker."""
+    grid = shock_grid or AUTONOMOUS_SHOCK_GRID
+    sector_data = st.session_state.get("sector_dict") if sector_dict is None else sector_dict
+    return agentic_ops.run_autonomous_stress_test(
+        date_str=date_str,
+        threshold=threshold,
+        model=model,
+        shock_grid=grid,
+        max_seeds=max_seeds,
+        sector_dict=sector_data or {},
+        data_loader_mod=data_loader,
+        network_mod=network,
+        contagion_mod=contagion,
+    )
+
+
+def _parse_portfolio_positions(text: str, allowed_tickers: set[str]) -> tuple[list[dict], list[str]]:
+    return agentic_ops.parse_portfolio_positions(text, allowed_tickers)
+
+
+def run_portfolio_copilot(
+    *,
+    portfolio_text: str,
+    date_str: str,
+    threshold: float,
+    model: str,
+    stress_shock_pct: int,
+    risk_profile: str | None = None,
+    tickers: list[str] | None = None,
+    sector_dict: dict[str, str] | None = None,
+) -> dict:
+    """Portfolio Co-Pilot: position-aware stress diagnostics and hedge runbook."""
+    risk_profile_val = st.session_state.get("risk_profile", "balanced") if risk_profile is None else risk_profile
+    ticker_list = st.session_state.get("tickers") if tickers is None else tickers
+    sector_data = st.session_state.get("sector_dict") if sector_dict is None else sector_dict
+    return agentic_ops.run_portfolio_copilot(
+        portfolio_text=portfolio_text,
+        date_str=date_str,
+        threshold=threshold,
+        model=model,
+        stress_shock_pct=stress_shock_pct,
+        risk_profile=str(risk_profile_val),
+        tickers=ticker_list or [],
+        sector_dict=sector_data or {},
+        data_loader_mod=data_loader,
+        network_mod=network,
+        contagion_mod=contagion,
+    )
+
+
+def build_auto_portfolio_from_network(
+    *,
+    date_str: str,
+    threshold: float,
+    n_positions: int = 5,
+    sector_dict: dict[str, str] | None = None,
+) -> dict:
+    """Generate portfolio candidates from current network (pagerank + sector diversification)."""
+    sector_data = st.session_state.get("sector_dict") if sector_dict is None else sector_dict
+    return agentic_ops.build_auto_portfolio_from_network(
+        date_str=date_str,
+        threshold=threshold,
+        n_positions=n_positions,
+        sector_dict=sector_data or {},
+        data_loader_mod=data_loader,
+        network_mod=network,
+    )
 
 
 def evaluate_run_trace(trace: dict) -> dict:
@@ -975,18 +1352,22 @@ def evaluate_run_trace(trace: dict) -> dict:
     gpt_attempted = bool(result.get("gpt_attempted"))
     gpt_success = bool(result.get("gpt_success"))
     structured_ok = bool(result.get("structured_output_valid", False))
+    critic_approved = result.get("critic_approved")
+    if critic_approved is not None:
+        critic_approved = bool(critic_approved)
     facts_mode = policy.get("facts_mode", "none")
     factual_consistency = None
     if gpt_attempted and gpt_success:
         factual_consistency = bool(structured_ok and facts_mode != "none")
 
     rate_limit_events = sum(1 for e in events if e.get("label") in {"gpt_backoff", "gpt_policy_block"})
+    has_local_output = bool(trace.get("parsed")) or bool(policy.get("router", {}).get("run_local_first", False))
     used_fallback = state in {
         "gpt_retry_ok",
         "gpt_fallback_ok",
         "gpt_failed_local_fallback",
         "gpt_policy_block_local",
-    }
+    } or (state == "gpt_failed" and has_local_output)
     model_uncertainty = result.get("uncertainty_score")
     if isinstance(model_uncertainty, (int, float)):
         uncertainty_score = max(0.0, min(1.0, float(model_uncertainty)))
@@ -1005,6 +1386,7 @@ def evaluate_run_trace(trace: dict) -> dict:
         "latency_sec": float(timings.get("total_sec", 0.0) or 0.0),
         "gpt_attempted": gpt_attempted,
         "gpt_success": gpt_success,
+        "critic_approved": critic_approved,
         "structured_output_valid": structured_ok,
         "factual_consistency": factual_consistency,
         "cache_hit": bool(policy.get("cache_hit", False)),
@@ -1036,13 +1418,72 @@ def summarize_quality(history: list[dict]) -> dict:
     }
 
 
+def build_judge_kpis(history: list[dict]) -> dict:
+    """Compute judge-facing KPI snapshot from run history."""
+    samples: list[EvalSample] = []
+    for row in history:
+        quality = row.get("quality", {}) if isinstance(row.get("quality"), dict) else {}
+        result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
+        timings = row.get("timings", {}) if isinstance(row.get("timings"), dict) else {}
+
+        critic_approved = result.get("critic_approved")
+        if not isinstance(critic_approved, bool):
+            critic_approved = bool(
+                result.get("structured_output_valid", False) and result.get("gpt_success", False)
+            )
+
+        factual = quality.get("factual_consistency")
+        factual_consistent = bool(factual) if factual is not None else False
+        latency_sec = float(timings.get("total_sec", 0.0) or 0.0)
+        fallback_used = bool(quality.get("used_fallback", False))
+        samples.append(
+            EvalSample(
+                critic_approved=critic_approved,
+                factual_consistent=factual_consistent,
+                latency_sec=latency_sec,
+                fallback_used=fallback_used,
+            )
+        )
+
+    out = evaluate_samples(samples)
+    out["gpt_runs"] = int(sum(1 for row in history if row.get("result", {}).get("gpt_attempted")))
+    out["gpt_success_runs"] = int(sum(1 for row in history if row.get("result", {}).get("gpt_success")))
+    return out
+
+
+def build_judge_run_rows(history: list[dict], limit: int = 20) -> pd.DataFrame:
+    rows: list[dict] = []
+    for row in history[-limit:]:
+        result = row.get("result", {}) if isinstance(row.get("result"), dict) else {}
+        quality = row.get("quality", {}) if isinstance(row.get("quality"), dict) else {}
+        timings = row.get("timings", {}) if isinstance(row.get("timings"), dict) else {}
+        rows.append(
+            {
+                "query": str(row.get("query", ""))[:90],
+                "state": result.get("state", "n/a"),
+                "critic_approved": result.get("critic_approved", None),
+                "factual_consistency": quality.get("factual_consistency", None),
+                "latency_sec": round(float(timings.get("total_sec", 0.0) or 0.0), 2),
+                "fallback": bool(quality.get("used_fallback", False)),
+                "uncertainty": quality.get("uncertainty_score", None),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def build_submission_bundle_bytes() -> bytes:
     report = generate_report_text()
     brief_md = generate_report_markdown()
+    action_ceo = generate_action_pack_ceo_brief()
+    action_runbook = generate_action_pack_runbook()
+    action_json = generate_action_pack_machine_json()
     trace_json = generate_trace_bundle_json()
     quality = summarize_quality(st.session_state.run_trace_history)
+    judge_kpis = build_judge_kpis(st.session_state.run_trace_history)
     quality_json = json.dumps(quality, indent=2)
+    judge_json = json.dumps(judge_kpis, indent=2)
     scenario_eval_json = json.dumps(st.session_state.scenario_eval_results or {}, indent=2)
+    rag_json = json.dumps(st.session_state.rag_last_docs or [], indent=2)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -1050,7 +1491,12 @@ def build_submission_bundle_bytes() -> bytes:
         zf.writestr("executive_brief.md", brief_md)
         zf.writestr("explainability_trace.json", trace_json)
         zf.writestr("kpi_snapshot.json", quality_json)
+        zf.writestr("judge_dashboard_kpis.json", judge_json)
+        zf.writestr("evidence_rag_last_docs.json", rag_json)
         zf.writestr("scenario_pack_eval.json", scenario_eval_json)
+        zf.writestr("action_pack_ceo_brief.md", action_ceo)
+        zf.writestr("action_pack_risk_runbook.md", action_runbook)
+        zf.writestr("action_pack_machine.json", action_json)
     return buf.getvalue()
 
 
@@ -1661,14 +2107,14 @@ def _compute_layout(G: nx.Graph) -> dict:
 
 def _stress_color(stress: float) -> str:
     if stress >= 0.8:
-        return "#ff1744"
+        return RISK_COLORS["critical"]
     elif stress >= 0.5:
-        return "#ff6d00"
+        return RISK_COLORS["high"]
     elif stress >= 0.2:
-        return "#ffc107"
+        return RISK_COLORS["moderate"]
     elif stress > 0.01:
-        return "#4fc3f7"
-    return "#2a3040"
+        return RISK_COLORS["low"]
+    return "#334155"
 
 
 def _build_base_layout(height: int = 580, title_text: str = "") -> go.Layout:
@@ -1676,11 +2122,11 @@ def _build_base_layout(height: int = 580, title_text: str = "") -> go.Layout:
     return go.Layout(
         showlegend=False, hovermode="closest",
         margin=dict(b=40, l=10, r=10, t=50),
-        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+        plot_bgcolor=PALETTE["bg_main"], paper_bgcolor=PALETTE["bg_main"],
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         height=height,
-        title=dict(text=title_text, font=dict(color="#ff8a65", size=16),
+        title=dict(text=title_text, font=dict(color=PALETTE["accent_warm"], size=16),
                    x=0.5, xanchor="center") if title_text else None,
     )
 
@@ -1696,7 +2142,7 @@ def _bg_edge_trace(G: nx.Graph, pos: dict) -> go.Scatter:
             ey.extend([y0, y1, None])
     return go.Scatter(
         x=ex, y=ey, mode="lines",
-        line=dict(width=0.3, color="rgba(42, 48, 64, 0.25)"),
+        line=dict(width=0.3, color=PLOT_EDGE_BG),
         hoverinfo="none", showlegend=False,
     )
 
@@ -1715,7 +2161,7 @@ def _stressed_edge_trace(G: nx.Graph, pos: dict, stress: dict) -> go.Scatter:
             ey.extend([y0, y1, None])
     return go.Scatter(
         x=ex, y=ey, mode="lines",
-        line=dict(width=1.8, color="rgba(255, 100, 0, 0.45)"),
+        line=dict(width=1.8, color=PLOT_EDGE_STRESS),
         hoverinfo="none", showlegend=False,
     )
 
@@ -1734,23 +2180,23 @@ def _node_trace(G: nx.Graph, pos: dict, stress: dict | None,
         is_s = node == shocked_node
 
         if stress:
-            colors.append("#ffffff" if is_s else _stress_color(s))
+            colors.append("#f8fafc" if is_s else _stress_color(s))
             sizes.append(28 if is_s else max(5, int(5 + s * 20)))
         else:
-            colors.append(data_loader.SECTOR_COLORS.get(sector, "#cccccc"))
+            colors.append(data_loader.SECTOR_COLORS.get(sector, RISK_COLORS["none"]))
             sizes.append(7)
 
         s_txt = f"<br>Stress: {s:.1%}" if stress else ""
         texts.append(f"<b>{node}</b><br>Sector: {sector}<br>Connections: {G.degree(node)}{s_txt}")
         labels.append(node if (is_s or (stress and s >= 0.5)) else "")
-        outlines.append("#ff0000" if is_s else "#0e1117")
+        outlines.append(RISK_COLORS["critical"] if is_s else PALETTE["bg_main"])
 
     return go.Scatter(
         x=nx_, y=ny_, mode="markers+text",
         hoverinfo="text", hovertext=texts,
         marker=dict(size=sizes, color=colors, line=dict(width=1.5, color=outlines)),
         text=labels, textposition="top center",
-        textfont=dict(size=9, color="white"),
+        textfont=dict(size=9, color=PALETTE["text_primary"]),
         showlegend=False,
     )
 
@@ -1812,7 +2258,7 @@ def build_animated_figure(
                 _node_trace(G, pos, ws, shocked_node),
             ],
             name=str(w),
-            layout=go.Layout(title=dict(text=label, font=dict(color="#ff8a65", size=16),
+            layout=go.Layout(title=dict(text=label, font=dict(color=PALETTE["accent_warm"], size=16),
                                         x=0.5, xanchor="center")),
         ))
 
@@ -1852,10 +2298,10 @@ def build_animated_figure(
             active=0, steps=steps,
             x=0.1, len=0.8, y=-0.02,
             currentvalue=dict(prefix="Cascade: ", visible=True,
-                              font=dict(color="#ff8a65", size=13)),
-            tickcolor="#8b95a5", font=dict(color="#8b95a5"),
-            bgcolor="#1a1f2e", bordercolor="#1a1f2e",
-            activebgcolor="#ff8a65",
+                              font=dict(color=PALETTE["accent_warm"], size=13)),
+            tickcolor=PALETTE["text_muted"], font=dict(color=PALETTE["text_muted"]),
+            bgcolor=PALETTE["surface_1"], bordercolor=PALETTE["surface_1"],
+            activebgcolor=PALETTE["accent_warm"],
         )],
     )
 
@@ -1883,6 +2329,214 @@ def build_severity_df(result: contagion.ShockResult) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("Avg Stress %", ascending=False)
 
 
+def compute_systemic_risk_index(result: contagion.ShockResult, total_nodes: int) -> tuple[float, str]:
+    """Compute a compact 0-100 systemic risk index for dashboard gauge."""
+    summary = result.summary()
+    n_nodes = max(1, int(total_nodes))
+    affected_pct = (summary["n_affected"] / n_nodes) * 100.0
+    defaulted_pct = (summary["n_defaulted"] / n_nodes) * 100.0
+    avg_stress_pct = float(summary["avg_stress"]) * 100.0
+    depth_score = min(100.0, float(summary["cascade_depth"]) * 12.5)
+
+    score = (
+        0.40 * avg_stress_pct
+        + 0.25 * affected_pct
+        + 0.20 * depth_score
+        + 0.15 * defaulted_pct
+    )
+    score = max(0.0, min(100.0, score))
+
+    if score >= 70:
+        label = "CRITICAL"
+    elif score >= 50:
+        label = "HIGH"
+    elif score >= 30:
+        label = "ELEVATED"
+    else:
+        label = "LOW"
+    return score, label
+
+
+def build_sector_impact_bar_figure(result: contagion.ShockResult, top_n: int = 10) -> go.Figure:
+    """Bar chart: affected nodes by sector, colored by average stress."""
+    df = build_severity_df(result).copy()
+    if df.empty:
+        return go.Figure()
+    df = df.sort_values(["Nodes Hit", "Avg Stress %"], ascending=[False, False]).head(top_n)
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=df["Sector"],
+            y=df["Nodes Hit"],
+            marker=dict(
+                color=df["Avg Stress %"],
+                colorscale=PLOTLY_STRESS_COLORSCALE,
+                colorbar=dict(title="Avg Stress %"),
+            ),
+            customdata=np.stack([df["Avg Stress %"], df["Defaulted"]], axis=-1),
+            hovertemplate=(
+                "<b>%{x}</b><br>"
+                "Nodes Hit: %{y}<br>"
+                "Avg Stress: %{customdata[0]:.1f}%<br>"
+                "Defaulted: %{customdata[1]}<extra></extra>"
+            ),
+        )
+    )
+    fig.update_layout(
+        title="Affected Nodes by Sector",
+        height=320,
+        margin=dict(l=30, r=20, t=40, b=30),
+        plot_bgcolor=PALETTE["bg_main"],
+        paper_bgcolor=PALETTE["bg_main"],
+        font=dict(color=PALETTE["text_primary"]),
+        xaxis=dict(color=PALETTE["text_muted"], tickangle=-20),
+        yaxis=dict(color=PALETTE["text_muted"], showgrid=True, gridcolor=PALETTE["surface_1"]),
+    )
+    return fig
+
+
+def build_stress_tier_donut_figure(result: contagion.ShockResult) -> go.Figure:
+    """Donut chart: distribution of stressed nodes by severity tier."""
+    tiers = {"Critical >80%": 0, "High 50-80%": 0, "Moderate 20-50%": 0, "Low 1-20%": 0}
+    for node, stress in result.node_stress.items():
+        if node == result.shocked_node or stress <= 0.01:
+            continue
+        if stress >= 0.8:
+            tiers["Critical >80%"] += 1
+        elif stress >= 0.5:
+            tiers["High 50-80%"] += 1
+        elif stress >= 0.2:
+            tiers["Moderate 20-50%"] += 1
+        else:
+            tiers["Low 1-20%"] += 1
+
+    labels = [k for k, v in tiers.items() if v > 0]
+    values = [v for _, v in tiers.items() if v > 0]
+    if not labels:
+        labels = ["No stressed nodes"]
+        values = [1]
+
+    colors = {
+        "Critical >80%": RISK_COLORS["critical"],
+        "High 50-80%": RISK_COLORS["high"],
+        "Moderate 20-50%": RISK_COLORS["moderate"],
+        "Low 1-20%": RISK_COLORS["low"],
+        "No stressed nodes": RISK_COLORS["none"],
+    }
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=labels,
+                values=values,
+                hole=0.55,
+                marker=dict(colors=[colors.get(lbl, RISK_COLORS["none"]) for lbl in labels]),
+                sort=False,
+                textinfo="label+percent",
+            )
+        ]
+    )
+    fig.update_layout(
+        title="Stress Tier Distribution",
+        height=320,
+        margin=dict(l=10, r=10, t=40, b=10),
+        plot_bgcolor=PALETTE["bg_main"],
+        paper_bgcolor=PALETTE["bg_main"],
+        font=dict(color=PALETTE["text_primary"]),
+        legend=dict(font=dict(color=PALETTE["text_muted"], size=10)),
+    )
+    return fig
+
+
+def build_systemic_risk_gauge_figure(result: contagion.ShockResult, total_nodes: int) -> tuple[go.Figure, float, str]:
+    """Gauge chart for systemic risk index + label."""
+    score, label = compute_systemic_risk_index(result, total_nodes)
+    fig = go.Figure(
+        go.Indicator(
+            mode="gauge+number",
+            value=score,
+            number={"suffix": "", "font": {"color": PALETTE["text_primary"]}},
+            gauge={
+                "axis": {"range": [0, 100], "tickcolor": PALETTE["text_muted"]},
+                "bar": {"color": PALETTE["accent_warm"]},
+                "steps": [
+                    {"range": [0, 30], "color": "#14532d"},
+                    {"range": [30, 50], "color": "#713f12"},
+                    {"range": [50, 70], "color": "#7c2d12"},
+                    {"range": [70, 100], "color": "#7f1d1d"},
+                ],
+            },
+        )
+    )
+    fig.update_layout(
+        title=f"Systemic Risk Index ({label})",
+        height=320,
+        margin=dict(l=20, r=20, t=40, b=20),
+        plot_bgcolor=PALETTE["bg_main"],
+        paper_bgcolor=PALETTE["bg_main"],
+        font=dict(color=PALETTE["text_primary"]),
+    )
+    return fig, score, label
+
+
+def build_wave_trend_figure(result: contagion.ShockResult) -> go.Figure:
+    """Combo chart: nodes hit per wave + wave stress contribution."""
+    rows = [
+        {"Wave": 0, "Nodes Hit": 1, "Wave Stress %": round(result.shock_magnitude * 100, 2)},
+    ]
+    for wave, nodes in result.cascade_waves:
+        wave_stress = sum(result.node_stress.get(n, 0.0) for n in nodes)
+        rows.append(
+            {
+                "Wave": int(wave),
+                "Nodes Hit": int(len(nodes)),
+                "Wave Stress %": round(float(wave_stress) * 100, 2),
+            }
+        )
+    df = pd.DataFrame(rows)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=df["Wave"],
+            y=df["Nodes Hit"],
+            name="Nodes Hit",
+            marker_color=PALETTE["accent_cool"],
+            opacity=0.85,
+            yaxis="y1",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=df["Wave"],
+            y=df["Wave Stress %"],
+            name="Wave Stress %",
+            mode="lines+markers",
+            line=dict(color=PALETTE["accent_warm"], width=2),
+            marker=dict(size=6),
+            yaxis="y2",
+        )
+    )
+    fig.update_layout(
+        title="Cascade Wave Dynamics",
+        height=320,
+        margin=dict(l=35, r=35, t=40, b=30),
+        plot_bgcolor=PALETTE["bg_main"],
+        paper_bgcolor=PALETTE["bg_main"],
+        font=dict(color=PALETTE["text_primary"]),
+        xaxis=dict(title="Wave", color=PALETTE["text_muted"], dtick=1),
+        yaxis=dict(title="Nodes Hit", color=PALETTE["accent_cool"], showgrid=True, gridcolor=PALETTE["surface_1"]),
+        yaxis2=dict(
+            title="Wave Stress %",
+            overlaying="y",
+            side="right",
+            color=PALETTE["accent_warm"],
+            showgrid=False,
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=PALETTE["text_muted"], size=10)),
+    )
+    return fig
+
+
 def build_timeline_figure() -> go.Figure | None:
     """Mini timeline chart: network density + VIX over time."""
     try:
@@ -1890,11 +2544,11 @@ def build_timeline_figure() -> go.Figure | None:
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=nm.index, y=nm["density"], name="Density",
-            line=dict(color="#4fc3f7", width=1.5),
+            line=dict(color=PALETTE["accent_cool"], width=1.5),
         ))
         fig.add_trace(go.Scatter(
             x=nm.index, y=nm["vix"] / 100, name="VIX / 100",
-            line=dict(color="#ff8a65", width=1.5),
+            line=dict(color=PALETTE["accent_warm"], width=1.5),
             yaxis="y2",
         ))
 
@@ -1902,28 +2556,28 @@ def build_timeline_figure() -> go.Figure | None:
         for name, (start, end) in data_loader.CRISIS_EVENTS.items():
             fig.add_vrect(
                 x0=start, x1=end,
-                fillcolor="rgba(255, 0, 0, 0.1)", line_width=0,
+                fillcolor=PLOT_EVENT_FILL, line_width=0,
                 annotation_text=name.split(" ")[0],
                 annotation_position="top left",
                 annotation_font_size=8,
-                annotation_font_color="#ff8a65",
+                annotation_font_color=PALETTE["accent_warm"],
             )
 
         # Mark selected date
         if st.session_state.graph_data:
             fig.add_vline(
                 x=st.session_state.graph_data["date"],
-                line_dash="dash", line_color="white", line_width=1,
+                line_dash="dash", line_color=PALETTE["text_primary"], line_width=1,
             )
 
         fig.update_layout(
             height=200, margin=dict(l=40, r=40, t=20, b=30),
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
-            legend=dict(orientation="h", yanchor="bottom", y=1, font=dict(size=10, color="#8b95a5")),
-            xaxis=dict(showgrid=False, color="#8b95a5"),
-            yaxis=dict(title="Density", showgrid=True, gridcolor="#1a1f2e", color="#4fc3f7", range=[0, 0.8]),
+            plot_bgcolor=PALETTE["bg_main"], paper_bgcolor=PALETTE["bg_main"],
+            legend=dict(orientation="h", yanchor="bottom", y=1, font=dict(size=10, color=PALETTE["text_muted"])),
+            xaxis=dict(showgrid=False, color=PALETTE["text_muted"]),
+            yaxis=dict(title="Density", showgrid=True, gridcolor=PALETTE["surface_1"], color=PALETTE["accent_cool"], range=[0, 0.8]),
             yaxis2=dict(title="VIX/100", overlaying="y", side="right", showgrid=False,
-                        color="#ff8a65", range=[0, 0.8]),
+                        color=PALETTE["accent_warm"], range=[0, 0.8]),
         )
         return fig
     except Exception:
@@ -2040,17 +2694,62 @@ def generate_report_markdown() -> str:
     return "\n".join(lines)
 
 
+def generate_action_pack_ceo_brief() -> str:
+    """One-page CEO narrative for fast executive decisioning."""
+    shock_summary = st.session_state.shock_result.summary() if st.session_state.shock_result else None
+    return reporting.generate_action_pack_ceo_brief(
+        graph_data=st.session_state.graph_data,
+        shock_summary=shock_summary,
+        commander=st.session_state.commander_results or {},
+        autonomous=st.session_state.autonomous_results or {},
+        portfolio=st.session_state.portfolio_copilot or {},
+    )
+
+
+def generate_action_pack_runbook() -> str:
+    """Operational runbook for risk desk execution."""
+    return reporting.generate_action_pack_runbook(
+        commander=st.session_state.commander_results or {},
+        portfolio=st.session_state.portfolio_copilot or {},
+    )
+
+
+def generate_action_pack_machine_json() -> str:
+    """Machine-readable action payload for automation / MCP style handoff."""
+    payload = reporting.build_action_pack_payload(
+        generated_at_utc=datetime.now(timezone.utc).isoformat(),
+        market_context=st.session_state.graph_data,
+        commander=st.session_state.commander_results,
+        autonomous_stress_test=st.session_state.autonomous_results,
+        portfolio_copilot=st.session_state.portfolio_copilot,
+        trace_summary=st.session_state.run_trace,
+        policy_plan=st.session_state.latest_policy_plan,
+        executor_log=st.session_state.latest_executor_log,
+        session_memory=st.session_state.session_decisions[-20:],
+    )
+    return reporting.generate_action_pack_machine_json(payload)
+
+
 def generate_trace_bundle_json() -> str:
     """Downloadable explainability payload for audit/demo."""
     quality_summary = summarize_quality(st.session_state.run_trace_history)
+    judge_kpis = build_judge_kpis(st.session_state.run_trace_history)
     payload = {
         "last_run_metrics": st.session_state.last_run_metrics,
         "trace": st.session_state.run_trace,
         "history_size": len(st.session_state.run_trace_history),
         "quality_summary": quality_summary,
+        "judge_kpis": judge_kpis,
+        "rag_last_docs": st.session_state.rag_last_docs,
         "risk_profile": st.session_state.risk_profile,
+        "policy_plan": st.session_state.latest_policy_plan,
+        "executor_log": st.session_state.latest_executor_log,
+        "session_decisions": st.session_state.session_decisions[-20:],
+        "scenario_commander": st.session_state.commander_results,
+        "autonomous_stress_test": st.session_state.autonomous_results,
+        "portfolio_copilot": st.session_state.portfolio_copilot,
     }
-    return json.dumps(payload, indent=2)
+    return json.dumps(reporting.json_safe(payload), indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -2061,100 +2760,7 @@ with st.sidebar:
     st.caption("Agentic Systemic Risk Simulator")
     st.divider()
 
-    # === AGENT MODE ===
-    st.markdown("### 🤖 Agent Mode")
-    is_agent_ready, agent_err = get_agent_config_status()
-    access_policy = get_gpt_access_policy()
-    can_enable_agent_mode = bool(is_agent_ready and access_policy["allowed"])
-    if can_enable_agent_mode:
-        st.caption("GPT orchestrator available")
-    elif not is_agent_ready:
-        st.caption("GPT orchestrator unavailable (using local fallback)")
-    else:
-        st.caption("GPT locked: judge access code required")
-
-    st.session_state.agent_mode = st.toggle(
-        "Use GPT Orchestrator",
-        value=st.session_state.agent_mode if can_enable_agent_mode else False,
-        disabled=not can_enable_agent_mode,
-        help="When enabled, chat queries are routed to the multi-agent orchestrator (Architect → Quant → Advisor).",
-    )
-    st.session_state.agent_strategy = st.selectbox(
-        "Agent strategy",
-        options=["simple", "orchestrator", "workflow_parallel"],
-        index=["simple", "orchestrator", "workflow_parallel"].index(st.session_state.agent_strategy)
-        if st.session_state.agent_strategy in {"simple", "orchestrator", "workflow_parallel"} else 0,
-        disabled=not st.session_state.agent_mode,
-        help=(
-            "simple = one tool-calling agent. orchestrator = agent-as-tool chain. "
-            "workflow_parallel = Architect+Quant parallel + Advisor+Critic. "
-            "For multi-ticker compare queries, app auto-switches to commentary_direct "
-            "(deterministic local compare + GPT commentary only)."
-        ),
-    )
-    st.session_state.high_quality_mode = st.toggle(
-        "High quality mode (gpt-4o)",
-        value=st.session_state.high_quality_mode,
-        disabled=not st.session_state.agent_mode,
-        help="OFF = use gpt-4o-mini by default for speed and fewer 429. ON = use gpt-4o.",
-    )
-    st.session_state.gpt_for_parseable_queries = st.toggle(
-        "Run GPT on standard shock queries",
-        value=st.session_state.gpt_for_parseable_queries,
-        disabled=not st.session_state.agent_mode,
-        help="If disabled, standard parseable shock queries use fast local engine only.",
-    )
-    st.session_state.risk_profile = st.selectbox(
-        "Risk profile",
-        options=["conservative", "balanced", "aggressive"],
-        index=["conservative", "balanced", "aggressive"].index(st.session_state.risk_profile)
-        if st.session_state.risk_profile in {"conservative", "balanced", "aggressive"} else 1,
-        help="Portfolio posture used by Advisor recommendations.",
-    )
-    st.session_state.agent_timeout_sec = st.slider(
-        "Agent timeout (sec)",
-        min_value=10, max_value=120, value=st.session_state.agent_timeout_sec, step=5,
-        disabled=not st.session_state.agent_mode,
-    )
-    if st.button("Run GPT Diagnostic", use_container_width=True, disabled=not can_enable_agent_mode):
-        try:
-            st.session_state.agent_diagnostic = run_gpt_diagnostic()
-        except Exception as exc:
-            st.session_state.agent_diagnostic = f"diagnostic_err={type(exc).__name__}: {exc}"
-    try:
-        primary_dep, fallback_dep = get_deployment_routing(st.session_state.high_quality_mode)
-        st.caption(f"Primary: {primary_dep} | Fallback: {fallback_dep}")
-    except Exception:
-        pass
-    if not is_agent_ready and agent_err:
-        st.warning(agent_err)
-    if access_policy["gate_enabled"] and not access_policy["allowed"]:
-        judge_code = st.text_input("Judge access code", type="password", placeholder="Enter code")
-        if st.button("Unlock GPT", use_container_width=True):
-            if unlock_judge_access(judge_code):
-                st.session_state.judge_unlock_error = ""
-                st.rerun()
-            else:
-                st.session_state.judge_unlock_error = "Invalid code."
-        if st.session_state.judge_unlock_error:
-            st.error(st.session_state.judge_unlock_error)
-    elif access_policy["gate_enabled"] and access_policy["allowed"]:
-        st.success("Judge access unlocked for this session.")
-
-    rate_cfg_caption = (
-        f"Soft limits: {_get_runtime_int('GPT_MAX_CALLS_PER_MINUTE_SESSION', 8)}/min session, "
-        f"{_get_runtime_int('GPT_MAX_CALLS_PER_MINUTE_GLOBAL', 20)}/min global, "
-        f"{_get_runtime_int('GPT_MAX_CALLS_PER_SESSION', 120)} per session."
-    )
-    st.caption(rate_cfg_caption)
-    st.caption("Tool contract: mcp.tool.result.v1 (MCP-ready JSON envelopes)")
-    if st.session_state.agent_diagnostic:
-        st.code(st.session_state.agent_diagnostic, language="text")
-
-    st.divider()
-
-    # === DEMO MODE ===
-    st.markdown("### 🎬 Demo Mode")
+    st.markdown("### ⚡ Quick Actions")
     st.session_state.demo_mode = st.toggle(
         "Guided demo flow",
         value=st.session_state.demo_mode,
@@ -2186,37 +2792,6 @@ with st.sidebar:
     if st.button("▶ Run Scenario", use_container_width=True):
         st.session_state.pending_chat_query = selected_scenario["query"]
         st.rerun()
-
-    st.divider()
-
-    # === OBSERVABILITY ===
-    st.markdown("### 🔍 Explainability")
-    st.session_state.show_explainability = st.toggle(
-        "Show explainability panel",
-        value=st.session_state.show_explainability,
-    )
-    st.session_state.persist_trace_logs = st.toggle(
-        "Persist traces to JSONL",
-        value=st.session_state.persist_trace_logs,
-        help="Stores each run trace in artifacts/run_traces.jsonl",
-    )
-
-    if st.button("🧪 Run Local Benchmark (5 queries)", use_container_width=True):
-        with st.spinner("Running benchmark pack..."):
-            st.session_state.eval_results = run_local_benchmark(st.session_state.sel_threshold)
-    if st.button("🧩 Evaluate Scenario Pack", use_container_width=True):
-        st.session_state.scenario_eval_results = run_scenario_pack_eval()
-    if st.session_state.eval_results:
-        er = st.session_state.eval_results
-        bcols = st.columns(3)
-        bcols[0].metric("Benchmark", f"{er['n_ok']}/{er['n_queries']}")
-        bcols[1].metric("Success", f"{er['success_rate_pct']:.1f}%")
-        bcols[2].metric("Avg latency", f"{er['avg_latency_s']:.2f}s")
-    if st.session_state.scenario_eval_results:
-        sr_eval = st.session_state.scenario_eval_results
-        scols = st.columns(2)
-        scols[0].metric("Scenario pack", f"{sr_eval['n_pass']}/{sr_eval['n_scenarios']}")
-        scols[1].metric("Pass rate", f"{sr_eval['pass_rate_pct']:.1f}%")
 
     st.divider()
 
@@ -2265,19 +2840,60 @@ with st.sidebar:
     build_btn = col1.button("🔨 Build", use_container_width=True)
     shock_btn = col2.button("💥 Shock", use_container_width=True, type="primary")
     compare_btn = st.button("⚖️ Compare All 3 Models", use_container_width=True)
+    st.markdown("### 🤖 Agentic Ops")
+    a1, a2 = st.columns(2)
+    commander_btn = a1.button("🧭 Scenario Commander", use_container_width=True)
+    autonomous_btn = a2.button("🛰️ Auto Stress Test", use_container_width=True)
+    st.session_state.portfolio_text = st.text_area(
+        "Portfolio (ticker,weight per line)",
+        value=st.session_state.portfolio_text,
+        height=120,
+        placeholder=PORTFOLIO_SAMPLE,
+        help="Editable input. Format: TICKER,weight (es. JPM,0.25).",
+    )
+    pcol1, pcol2 = st.columns(2)
+    if pcol1.button("Load Sample Portfolio", use_container_width=True):
+        st.session_state.portfolio_text = PORTFOLIO_SAMPLE
+        st.session_state.last_agentic_action = "Sample portfolio loaded. Edit freely or run Co-Pilot."
+        st.rerun()
+    st.session_state.auto_portfolio_n = pcol2.selectbox(
+        "Auto N",
+        options=[3, 4, 5, 6, 8, 10],
+        index=[3, 4, 5, 6, 8, 10].index(st.session_state.auto_portfolio_n)
+        if st.session_state.auto_portfolio_n in {3, 4, 5, 6, 8, 10}
+        else 2,
+        help="Number of positions for auto-generated portfolio.",
+    )
+    auto_portfolio_btn = st.button("✨ Auto-generate from current network", use_container_width=True)
+    portfolio_btn = st.button("📦 Portfolio Co-Pilot", use_container_width=True)
+    full_demo_btn = st.button("🎬 Run Full Agentic Demo", use_container_width=True)
 
-    st.divider()
-    st.markdown("### 🏷️ Sectors")
-    for sector, color in data_loader.SECTOR_COLORS.items():
-        short = sector.replace("Information ", "Info ").replace("Consumer ", "Cons. ").replace("Communication ", "Comm. ")
-        st.markdown(f'<span class="sector-dot" style="background:{color}"></span><small>{short}</small>',
-                    unsafe_allow_html=True)
+    st.caption("First `Build` loads correlation data into memory (~1GB on disk, ~1.4GB RAM process peak).")
+    st.caption("Advanced GPT controls, diagnostics, and explainability tools are in the `Settings` tab.")
 
 
 # ---------------------------------------------------------------------------
 # BUILD / SHOCK ACTIONS
 # ---------------------------------------------------------------------------
-if build_btn or st.session_state.graph_data is None:
+sector_dict_ctx = dict(st.session_state.get("sector_dict") or {})
+tickers_ctx = list(st.session_state.get("tickers") or [])
+risk_profile_ctx = str(st.session_state.get("risk_profile", "balanced"))
+auto_portfolio_n_ctx = int(st.session_state.get("auto_portfolio_n", 5) or 5)
+portfolio_text_ctx = str(st.session_state.get("portfolio_text", "") or "")
+agentic_requested = bool(commander_btn or autonomous_btn or auto_portfolio_btn or portfolio_btn or full_demo_btn)
+if agentic_requested and (not sector_dict_ctx or not tickers_ctx):
+    try:
+        sector_dict_ctx = dict(data_loader.get_sector_dict() or {})
+        tickers_ctx = list(data_loader.get_ticker_list() or [])
+        st.session_state.sector_dict = sector_dict_ctx
+        st.session_state.tickers = tickers_ctx
+    except Exception as exc:
+        st.session_state.last_agentic_action = (
+            "Agentic ops unavailable: reference data not loaded "
+            f"({type(exc).__name__}: {exc})."
+        )
+
+if build_btn or (AUTO_BUILD_ON_START and st.session_state.graph_data is None):
     st.session_state.agent_messages = []
     do_build_network(selected_date, threshold)
 
@@ -2298,6 +2914,357 @@ if compare_btn and st.session_state.graph_data:
              f"See comparison table below the network graph.")
         ]
 
+if commander_btn and sector_dict_ctx:
+    cmd_key = _agentic_cache_key(
+        "scenario_commander",
+        date=selected_date,
+        threshold=round(float(threshold), 3),
+        shock_pct=int(shock_pct),
+        model=shock_model,
+        top_n=DEFAULT_COMMANDER_TOP_N,
+    )
+    with st.spinner("Running Scenario Commander..."):
+        cmd_res, from_cache = _run_agentic_operation(
+            op_name="Scenario Commander",
+            cache_key=cmd_key,
+            fn=lambda: run_scenario_commander(
+                date_str=selected_date,
+                threshold=threshold,
+                shock_pct=shock_pct,
+                model=shock_model,
+                top_n=DEFAULT_COMMANDER_TOP_N,
+                sector_dict=sector_dict_ctx,
+            ),
+        )
+    if not cmd_res.get("ok", True):
+        st.session_state.last_agentic_action = f"Scenario Commander failed: {cmd_res.get('error', 'unknown error')}."
+    else:
+        st.session_state.commander_results = cmd_res
+        top = cmd_res.get("top_pick")
+        if top:
+            cache_suffix = " (cached)" if from_cache else ""
+            st.session_state.agent_messages.append(
+                (
+                    "Sentinel",
+                    "🛡️",
+                    "agent-sentinel",
+                    f"Scenario Commander completed{cache_suffix}. Top systemic seed: <b>{top['ticker']}</b> "
+                    f"(score {top['risk_score']:.1f}, depth {top['cascade_depth']}).",
+                )
+            )
+            st.session_state.last_agentic_action = (
+                f"Scenario Commander done{cache_suffix}: top={top['ticker']} score={top['risk_score']:.1f}. "
+                "Open Dashboard tab for full ranking."
+            )
+
+if autonomous_btn and sector_dict_ctx:
+    auto_key = _agentic_cache_key(
+        "autonomous_stress_test",
+        date=selected_date,
+        threshold=round(float(threshold), 3),
+        model=shock_model,
+        shock_grid=AUTONOMOUS_SHOCK_GRID,
+        max_seeds=DEFAULT_AUTONOMOUS_SEEDS,
+    )
+    with st.spinner("Running Autonomous Stress Test..."):
+        auto_res, from_cache = _run_agentic_operation(
+            op_name="Autonomous Stress Test",
+            cache_key=auto_key,
+            fn=lambda: run_autonomous_stress_test(
+                date_str=selected_date,
+                threshold=threshold,
+                model=shock_model,
+                sector_dict=sector_dict_ctx,
+            ),
+        )
+    if not auto_res.get("ok", True):
+        st.session_state.last_agentic_action = f"Auto Stress failed: {auto_res.get('error', 'unknown error')}."
+    else:
+        st.session_state.autonomous_results = auto_res
+        rows = auto_res.get("rows") or []
+        if rows:
+            lead = rows[0]
+            cache_suffix = " (cached)" if from_cache else ""
+            st.session_state.agent_messages.append(
+                (
+                    "Sentinel",
+                    "🛡️",
+                    "agent-sentinel",
+                    f"Autonomous Stress Test completed{cache_suffix}. Lead fragility: <b>{lead['ticker']}</b> @ "
+                    f"{lead['shock_pct']}% (score {lead['risk_score']:.1f}).",
+                )
+            )
+            st.session_state.last_agentic_action = (
+                f"Auto Stress done{cache_suffix}: lead={lead['ticker']} shock={lead['shock_pct']}% "
+                f"score={lead['risk_score']:.1f}. Open Dashboard tab for table."
+            )
+
+if auto_portfolio_btn and sector_dict_ctx:
+    auto_port_key = _agentic_cache_key(
+        "auto_portfolio",
+        date=selected_date,
+        threshold=round(float(threshold), 3),
+        n_positions=int(st.session_state.auto_portfolio_n),
+    )
+    with st.spinner("Generating portfolio from current network..."):
+        auto_pack, from_cache = _run_agentic_operation(
+            op_name="Auto Portfolio",
+            cache_key=auto_port_key,
+            fn=lambda: build_auto_portfolio_from_network(
+                date_str=selected_date,
+                threshold=threshold,
+                n_positions=auto_portfolio_n_ctx,
+                sector_dict=sector_dict_ctx,
+            ),
+        )
+    if auto_pack.get("ok"):
+        st.session_state.portfolio_text = auto_pack.get("portfolio_text", "")
+        top = (auto_pack.get("rows") or [{}])[0]
+        cache_suffix = " (cached)" if from_cache else ""
+        st.session_state.last_agentic_action = (
+            f"Auto-portfolio ready{cache_suffix} ({len(auto_pack.get('rows', []))} positions) "
+            f"for {auto_pack.get('date')}, regime {auto_pack.get('regime')}."
+        )
+        st.session_state.agent_messages.append(
+            (
+                "Architect",
+                "🔧",
+                "agent-architect",
+                "Auto portfolio created from network topology "
+                f"(method: {auto_pack.get('method')}{cache_suffix}). Top ticker: <b>{top.get('ticker', 'n/a')}</b>.",
+            )
+        )
+    else:
+        st.session_state.last_agentic_action = (
+            f"Auto-portfolio failed: {auto_pack.get('error', 'unknown error')}."
+        )
+
+if portfolio_btn and sector_dict_ctx and tickers_ctx:
+    portfolio_hash = hashlib.sha1(portfolio_text_ctx.strip().encode("utf-8")).hexdigest()
+    copilot_key = _agentic_cache_key(
+        "portfolio_copilot",
+        portfolio_hash=portfolio_hash,
+        date=selected_date,
+        threshold=round(float(threshold), 3),
+        model=shock_model,
+        shock_pct=int(shock_pct),
+        risk_profile=st.session_state.risk_profile,
+    )
+    with st.spinner("Running Portfolio Co-Pilot..."):
+        cop, from_cache = _run_agentic_operation(
+            op_name="Portfolio Co-Pilot",
+            cache_key=copilot_key,
+            fn=lambda: run_portfolio_copilot(
+                portfolio_text=portfolio_text_ctx,
+                date_str=selected_date,
+                threshold=threshold,
+                model=shock_model,
+                stress_shock_pct=shock_pct,
+                risk_profile=risk_profile_ctx,
+                tickers=tickers_ctx,
+                sector_dict=sector_dict_ctx,
+            ),
+        )
+        st.session_state.portfolio_copilot = cop
+    if cop.get("ok"):
+        cache_suffix = " (cached)" if from_cache else ""
+        st.session_state.agent_messages.append(
+            (
+                "Advisor",
+                "📋",
+                "agent-advisor",
+                f"Portfolio Co-Pilot ready{cache_suffix}. Expected stress: "
+                f"<b>{cop.get('expected_stress_pct', 0.0):.1f}%</b> "
+                f"→ after hedges <b>{cop.get('expected_stress_pct_after_hedge', 0.0):.1f}%</b>.",
+            )
+        )
+        st.session_state.last_agentic_action = (
+            f"Portfolio Co-Pilot done{cache_suffix}: stress {cop.get('expected_stress_pct', 0.0):.1f}% "
+            f"-> {cop.get('expected_stress_pct_after_hedge', 0.0):.1f}%."
+        )
+    elif cop.get("timeout"):
+        st.session_state.last_agentic_action = f"Portfolio Co-Pilot timeout: {cop.get('error', 'try again')}."
+    elif cop.get("error"):
+        st.session_state.last_agentic_action = f"Portfolio Co-Pilot failed: {cop.get('error')}."
+    else:
+        errs = (cop.get("errors") or [])[:3]
+        st.session_state.last_agentic_action = (
+            "Portfolio Co-Pilot input invalid. "
+            + (" | ".join(errs) if errs else "Check ticker,weight format.")
+        )
+
+if full_demo_btn and sector_dict_ctx and tickers_ctx:
+    run = agentic_ops.build_full_demo_steps(now_utc=datetime.now(timezone.utc).isoformat())
+    failed = False
+    with st.spinner("Running Full Agentic Demo..."):
+        try:
+            do_build_network(selected_date, threshold)
+            agentic_ops.append_demo_step(run, "Build network", "ok", f"date={selected_date} threshold={threshold:.2f}")
+        except Exception as exc:
+            failed = True
+            agentic_ops.append_demo_step(run, "Build network", "failed", f"{type(exc).__name__}: {exc}")
+
+        if not failed:
+            cmd_key = _agentic_cache_key(
+                "scenario_commander",
+                date=selected_date,
+                threshold=round(float(threshold), 3),
+                shock_pct=int(shock_pct),
+                model=shock_model,
+                top_n=DEFAULT_COMMANDER_TOP_N,
+            )
+            cmd_res, cmd_cached = _run_agentic_operation(
+                op_name="Scenario Commander",
+                cache_key=cmd_key,
+                fn=lambda: run_scenario_commander(
+                    date_str=selected_date,
+                    threshold=threshold,
+                    shock_pct=shock_pct,
+                    model=shock_model,
+                    top_n=DEFAULT_COMMANDER_TOP_N,
+                    sector_dict=sector_dict_ctx,
+                ),
+            )
+            if cmd_res.get("ok", True):
+                st.session_state.commander_results = cmd_res
+                top = (cmd_res.get("top_pick") or {}).get("ticker", "n/a")
+                agentic_ops.append_demo_step(
+                    run, "Scenario Commander", "ok", f"top={top} cached={cmd_cached}"
+                )
+            else:
+                failed = True
+                agentic_ops.append_demo_step(
+                    run, "Scenario Commander", "failed", cmd_res.get("error", "unknown error")
+                )
+
+        if not failed:
+            auto_key = _agentic_cache_key(
+                "autonomous_stress_test",
+                date=selected_date,
+                threshold=round(float(threshold), 3),
+                model=shock_model,
+                shock_grid=AUTONOMOUS_SHOCK_GRID,
+                max_seeds=DEFAULT_AUTONOMOUS_SEEDS,
+            )
+            auto_res, auto_cached = _run_agentic_operation(
+                op_name="Autonomous Stress Test",
+                cache_key=auto_key,
+                fn=lambda: run_autonomous_stress_test(
+                    date_str=selected_date,
+                    threshold=threshold,
+                    model=shock_model,
+                    sector_dict=sector_dict_ctx,
+                ),
+            )
+            if auto_res.get("ok", True):
+                st.session_state.autonomous_results = auto_res
+                lead = ((auto_res.get("rows") or [{}])[0]).get("ticker", "n/a")
+                agentic_ops.append_demo_step(
+                    run, "Autonomous Stress Test", "ok", f"lead={lead} cached={auto_cached}"
+                )
+            else:
+                failed = True
+                agentic_ops.append_demo_step(
+                    run, "Autonomous Stress Test", "failed", auto_res.get("error", "unknown error")
+                )
+
+        if not failed and not portfolio_text_ctx.strip():
+            auto_port_key = _agentic_cache_key(
+                "auto_portfolio",
+                date=selected_date,
+                threshold=round(float(threshold), 3),
+                n_positions=int(st.session_state.auto_portfolio_n),
+            )
+            auto_pack, p_cached = _run_agentic_operation(
+                op_name="Auto Portfolio",
+                cache_key=auto_port_key,
+                fn=lambda: build_auto_portfolio_from_network(
+                    date_str=selected_date,
+                    threshold=threshold,
+                    n_positions=auto_portfolio_n_ctx,
+                    sector_dict=sector_dict_ctx,
+                ),
+            )
+            if auto_pack.get("ok"):
+                portfolio_text_ctx = str(auto_pack.get("portfolio_text", "") or "")
+                st.session_state.portfolio_text = portfolio_text_ctx
+                agentic_ops.append_demo_step(
+                    run,
+                    "Auto Portfolio",
+                    "ok",
+                    f"positions={len(auto_pack.get('rows', []))} cached={p_cached}",
+                )
+            else:
+                failed = True
+                agentic_ops.append_demo_step(
+                    run, "Auto Portfolio", "failed", auto_pack.get("error", "unknown error")
+                )
+
+        if not failed:
+            portfolio_hash = hashlib.sha1(portfolio_text_ctx.strip().encode("utf-8")).hexdigest()
+            copilot_key = _agentic_cache_key(
+                "portfolio_copilot",
+                portfolio_hash=portfolio_hash,
+                date=selected_date,
+                threshold=round(float(threshold), 3),
+                model=shock_model,
+                shock_pct=int(shock_pct),
+                risk_profile=st.session_state.risk_profile,
+            )
+            cop, cop_cached = _run_agentic_operation(
+                op_name="Portfolio Co-Pilot",
+                cache_key=copilot_key,
+                fn=lambda: run_portfolio_copilot(
+                    portfolio_text=portfolio_text_ctx,
+                    date_str=selected_date,
+                    threshold=threshold,
+                    model=shock_model,
+                    stress_shock_pct=shock_pct,
+                    risk_profile=risk_profile_ctx,
+                    tickers=tickers_ctx,
+                    sector_dict=sector_dict_ctx,
+                ),
+            )
+            st.session_state.portfolio_copilot = cop
+            if cop.get("ok"):
+                agentic_ops.append_demo_step(
+                    run,
+                    "Portfolio Co-Pilot",
+                    "ok",
+                    (
+                        f"stress={cop.get('expected_stress_pct', 0.0):.1f}% "
+                        f"avoided={cop.get('estimated_loss_avoided_pct', 0.0):.1f}% cached={cop_cached}"
+                    ),
+                )
+            else:
+                failed = True
+                detail = cop.get("error") or " | ".join((cop.get("errors") or [])[:2]) or "invalid input"
+                agentic_ops.append_demo_step(run, "Portfolio Co-Pilot", "failed", detail)
+
+    run["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+    if failed:
+        has_ok = any(s.get("status") == "ok" for s in run.get("steps", []))
+        run["status"] = "partial" if has_ok else "failed"
+    else:
+        run["status"] = "completed"
+    st.session_state.full_demo_last_run = run
+    if failed:
+        failed_steps = [s["step"] for s in run.get("steps", []) if s.get("status") == "failed"]
+        st.session_state.last_agentic_action = (
+            "Full Agentic Demo partial/failed. "
+            + (f"Failed step(s): {', '.join(failed_steps)}." if failed_steps else "Check logs.")
+        )
+    else:
+        st.session_state.last_agentic_action = "Full Agentic Demo completed (Build + Commander + Auto Stress + Co-Pilot)."
+        st.session_state.agent_messages.append(
+            (
+                "Sentinel",
+                "🛡️",
+                "agent-sentinel",
+                "Full Agentic Demo completed. Review Dashboard and Explainability tabs for ranked vulnerabilities and audit trail.",
+            )
+        )
+
 
 # ---------------------------------------------------------------------------
 # HEADER
@@ -2305,10 +3272,58 @@ if compare_btn and st.session_state.graph_data:
 st.markdown(
     '<div class="main-header">'
     '<h1 style="color:white; margin:0;">🛡️ RiskSentinel</h1>'
-    '<p style="color:#90caf9; margin:0;">Agentic Systemic Risk Simulator — S&P 500 Financial Contagion</p>'
+    f'<p style="color:{PALETTE["text_muted"]}; margin:0;">Agentic Systemic Risk Simulator — S&P 500 Financial Contagion</p>'
     '</div>',
     unsafe_allow_html=True,
 )
+tab_simulate, tab_dashboard, tab_explain, tab_settings = st.tabs(
+    ["🌐 Simulate", "📊 Dashboard", "🔍 Explainability", "⚙️ Settings"]
+)
+if st.session_state.last_agentic_action:
+    st.caption(f"Agentic Ops: {st.session_state.last_agentic_action}")
+if (
+    st.session_state.commander_results
+    or st.session_state.autonomous_results
+    or st.session_state.portfolio_copilot
+    or st.session_state.full_demo_last_run
+):
+    with st.expander("Latest Agentic Ops Result", expanded=True):
+        if st.session_state.full_demo_last_run:
+            demo = st.session_state.full_demo_last_run
+            st.markdown(f"**Full Demo:** status `{demo.get('status', 'n/a')}`")
+            steps = demo.get("steps", [])
+            if steps:
+                st.dataframe(pd.DataFrame(steps), use_container_width=True, hide_index=True)
+        if st.session_state.commander_results and st.session_state.commander_results.get("top_pick"):
+            top = st.session_state.commander_results["top_pick"]
+            st.markdown(
+                f"**Commander:** {top['ticker']} ({top['sector']}) | "
+                f"score {top['risk_score']:.1f} | depth {top['cascade_depth']}"
+            )
+        if st.session_state.autonomous_results and st.session_state.autonomous_results.get("rows"):
+            lead = st.session_state.autonomous_results["rows"][0]
+            st.markdown(
+                f"**Autonomous:** {lead['ticker']} @ {lead['shock_pct']}% | "
+                f"score {lead['risk_score']:.1f} | affected {lead['n_affected']}"
+            )
+        if st.session_state.portfolio_copilot:
+            cop = st.session_state.portfolio_copilot
+            if cop.get("ok"):
+                st.markdown(
+                    f"**Portfolio:** stress {cop.get('expected_stress_pct', 0.0):.1f}% "
+                    f"→ {cop.get('expected_stress_pct_after_hedge', 0.0):.1f}% "
+                    f"(avoided ~{cop.get('estimated_loss_avoided_pct', 0.0):.1f}%)"
+                )
+                formula_md = ui_panels.business_kpi_formula_markdown(cop.get("kpi"))
+                if formula_md:
+                    st.markdown(formula_md)
+            else:
+                errs = (cop.get("errors") or [])[:2]
+                st.warning("Portfolio input non valido. " + (" | ".join(errs) if errs else ""))
+        if st.session_state.portfolio_text.strip():
+            st.markdown("**Portfolio input corrente**")
+            st.code(st.session_state.portfolio_text.strip(), language="text")
+        st.caption("Dettagli completi nel tab Dashboard.")
 
 # === CHAT INPUT ===
 raw_chat_query = st.chat_input("Ask RiskSentinel... (e.g. 'What if Tesla crashes 60%?')")
@@ -2331,6 +3346,7 @@ if incoming_query:
     st.session_state.last_structured_payload = None
     st.session_state.compare_rows_local = []
     st.session_state.compare_meta = {}
+    st.session_state.rag_last_docs = []
     st.session_state.run_cancel_requested = False
     t_start = time.perf_counter()
     local_sec = None
@@ -2370,7 +3386,19 @@ if incoming_query:
         access_allowed=runtime_access_policy["allowed"],
         selected_strategy=st.session_state.agent_strategy,
     )
+    planned_steps = build_policy_plan(
+        query=chat_query,
+        parsed=parsed,
+        compare_query=compare_query,
+        in_scope=in_scope,
+        execution_policy=execution_policy,
+        selected_date=selected_date,
+        threshold=threshold,
+        model_for_query=model_for_query,
+    )
     trace["policy"]["router"] = execution_policy
+    trace["policy"]["planned_steps"] = planned_steps
+    st.session_state.latest_policy_plan = planned_steps
     trace_event(trace, "query_received", chat_query)
     trace_event(trace, "scope_check", scope_reason)
     trace_event(trace, "router_decision", execution_policy["route"])
@@ -2382,6 +3410,10 @@ if incoming_query:
         elapsed_box = st.empty()
         eta_box = st.empty()
         cancel_box = st.empty()
+        cancel_key = f"cancel_run_{trace['id']}"
+        if cancel_box.button("Cancel pending GPT steps", key=cancel_key):
+            st.session_state.run_cancel_requested = True
+            trace_event(trace, "cancel_requested", "user clicked cancel")
 
         def _step(pct: int, text: str) -> None:
             phase.markdown(f"**{text}**")
@@ -2395,9 +3427,6 @@ if incoming_query:
             phase.markdown(f"**{phase_text}**")
             elapsed_box.caption(f"Elapsed: {elapsed_now:.1f}s")
             eta_box.caption(f"ETA: {max(0.0, eta_sec):.1f}s")
-            if cancel_box.button("Cancel pending GPT steps", key=f"cancel_run_{trace['id']}"):
-                st.session_state.run_cancel_requested = True
-                trace_event(trace, "cancel_requested", "user clicked cancel")
 
         def _run_with_heartbeat(callable_fn, phase_text: str, eta_sec: float):
             pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
@@ -2616,14 +3645,39 @@ if incoming_query:
                     facts_plain = re.sub(r"<[^>]+>", "", facts_html).replace("&nbsp;", " ")
                     trace["policy"]["facts_preview"] = facts_plain[:500]
 
-                memory_hint = build_memory_hint(chat_query, st.session_state.run_trace_history)
+                memory_hint_parts: list[str] = []
+                if st.session_state.use_session_memory:
+                    hist_hint = build_memory_hint(chat_query, st.session_state.run_trace_history)
+                    if hist_hint:
+                        memory_hint_parts.append(hist_hint)
+                    decision_hint = build_session_decision_hint(chat_query)
+                    if decision_hint:
+                        memory_hint_parts.append(decision_hint)
+                memory_hint = "\n".join(memory_hint_parts).strip()
                 if memory_hint:
-                    trace["policy"]["memory_hint"] = memory_hint[:400]
+                    trace["policy"]["memory_hint"] = memory_hint[:500]
+
+                rag_docs = retrieve_evidence(
+                    chat_query,
+                    docs=(
+                        build_crisis_evidence_docs(data_loader.CRISIS_EVENTS)
+                        + build_history_evidence_docs(st.session_state.run_trace_history, max_items=14)
+                    ),
+                    top_k=4,
+                )
+                rag_context = format_evidence_block(rag_docs, max_chars=1800)
+                st.session_state.rag_last_docs = serialize_retrieved(rag_docs)
+                trace["policy"]["rag_doc_count"] = len(rag_docs)
+                trace["policy"]["rag_refs"] = [d.reference_id for d in rag_docs]
+                if rag_docs:
+                    trace_event(trace, "rag_retrieval", f"docs={len(rag_docs)} refs={trace['policy']['rag_refs']}")
+
                 prompt_for_agent = build_structured_prompt(
                     user_query=chat_query,
                     facts_plain=facts_plain,
                     risk_profile=st.session_state.risk_profile,
                     memory_hint=memory_hint,
+                    rag_context=rag_context,
                 )
                 if compare_query:
                     prompt_for_agent += (
@@ -2646,6 +3700,11 @@ if incoming_query:
                         trace["result"]["structured_output_valid"] = True
                         trace["result"]["uncertainty_score"] = payload.get("uncertainty_score")
                         trace["result"]["confidence_reason"] = payload.get("confidence_reason")
+                        validation = payload.get("validation", {})
+                        if isinstance(validation, dict) and "critic_approved" in validation:
+                            trace["result"]["critic_approved"] = bool(validation.get("critic_approved"))
+                            if "critic_rounds" in validation:
+                                trace["result"]["critic_rounds"] = int(validation.get("critic_rounds") or 0)
                         formatted_answer = render_structured_payload_html(payload)
                     else:
                         trace["result"]["structured_output_valid"] = False
@@ -2703,7 +3762,8 @@ if incoming_query:
                     answer_curr = candidate_answer
                     payload_curr = candidate_payload
                     critic_result: dict = {}
-                    for gate_round in range(2):
+                    max_rounds = agentic_ops.critic_round_limit(bool(st.session_state.critic_auto_repair))
+                    for gate_round in range(max_rounds):
                         _step(78 + gate_round * 4, "Validating output with Critic gate")
                         critic_result = run_critic_validation(
                             query=chat_query,
@@ -2717,6 +3777,7 @@ if incoming_query:
                         if approved:
                             payload_curr["validation"] = {
                                 "critic_approved": True,
+                                "critic_rounds": gate_round + 1,
                                 "critic_issues": critic_result.get("issues", []),
                                 "required_fixes": critic_result.get("required_fixes", []),
                             }
@@ -2726,7 +3787,7 @@ if incoming_query:
                                 payload_curr["confidence_reason"] = critic_result.get("confidence_reason")
                             return answer_curr, payload_curr, critic_result
 
-                        if gate_round >= 1:
+                        if gate_round >= max_rounds - 1:
                             break
                         issues = critic_result.get("issues", [])
                         fixes = critic_result.get("required_fixes", [])
@@ -2927,6 +3988,7 @@ if incoming_query:
         elapsed_box.caption(f"Elapsed: {elapsed:.1f}s")
         status.update(label=f"Completed in {elapsed:.1f}s", state="complete")
 
+    prev_result = trace.get("result", {}) if isinstance(trace.get("result"), dict) else {}
     st.session_state.last_run_metrics = {
         "total_sec": elapsed,
         "local_sec": local_sec,
@@ -2935,6 +3997,7 @@ if incoming_query:
         "gpt_success": gpt_success,
         "engine": engine_label,
         "state": run_state,
+        "critic_rounds": prev_result.get("critic_rounds"),
         "gpt_calls_total_session": st.session_state.gpt_calls_total_session,
         "gpt_rate_limit_hits": st.session_state.gpt_rate_limit_hits,
         "gpt_fail_streak": st.session_state.gpt_fail_streak,
@@ -2950,13 +4013,20 @@ if incoming_query:
         "engine": engine_label,
         "gpt_attempted": gpt_attempted,
         "gpt_success": gpt_success,
-        "structured_output_valid": bool(trace.get("result", {}).get("structured_output_valid", False)),
+        "structured_output_valid": bool(prev_result.get("structured_output_valid", False)),
+        "critic_approved": prev_result.get("critic_approved"),
+        "critic_rounds": prev_result.get("critic_rounds"),
+        "uncertainty_score": prev_result.get("uncertainty_score"),
+        "confidence_reason": prev_result.get("confidence_reason"),
     }
+    trace["policy"]["executor_log"] = summarize_executor_log(trace.get("events", []))
+    st.session_state.latest_executor_log = trace["policy"]["executor_log"]
     trace["quality"] = evaluate_run_trace(trace)
     st.session_state.run_quality = trace["quality"]
     advance_workflow(trace, "completed")
     trace_event(trace, "run_complete", run_state)
     trace = finalize_run_trace(trace)
+    remember_session_decision(chat_query, trace)
     persist_run_trace(trace)
 
 
@@ -2976,139 +4046,292 @@ if st.session_state.graph_data:
         cols[5].metric("Cascade", f"{summary['cascade_depth']} waves")
         cols[6].metric("Avg Stress", f"{summary['avg_stress']*100:.1f}%")
 
-# --- Main area ---
-graph_col, info_col = st.columns([3, 2])
 
-with graph_col:
-    st.markdown("### 🌐 Correlation Network")
+with tab_simulate:
+    graph_col, info_col = st.columns([3, 2])
 
-    if st.session_state.graph_data:
-        G = st.session_state.graph_data["G"]
-        pos = st.session_state.pos
-        sr = st.session_state.shock_result
+    with graph_col:
+        st.markdown("### 🌐 Correlation Network")
+        if st.session_state.graph_data:
+            G = st.session_state.graph_data["G"]
+            pos = st.session_state.pos
+            sr = st.session_state.shock_result
 
-        if sr:
-            blast_view = st.toggle("🎯 Blast radius only", value=False,
-                                   help="Show only affected subgraph")
-            fig = build_animated_figure(G, pos, sr, blast_radius_only=blast_view)
-            st.plotly_chart(fig, use_container_width=True,
-                            config={"displayModeBar": False, "scrollZoom": True})
-            st.markdown(
-                "⚪ Shocked &nbsp; 🔴 Critical &nbsp; 🟠 High &nbsp; "
-                "🟡 Moderate &nbsp; 🔵 Low &nbsp; ⚫ Unaffected &emsp; | &emsp; "
-                "Use **▶ Play** or drag the **slider** below the graph")
+            if sr:
+                blast_view = st.toggle(
+                    "🎯 Blast radius only",
+                    value=False,
+                    key="blast_radius_simulate",
+                    help="Show only affected subgraph",
+                )
+                fig = build_animated_figure(G, pos, sr, blast_radius_only=blast_view)
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
+                st.markdown(
+                    "⚪ Shocked &nbsp; 🔴 Critical &nbsp; 🟠 High &nbsp; "
+                    "🟡 Moderate &nbsp; 🔵 Low &nbsp; ⚫ Unaffected &emsp; | &emsp; "
+                    "Use **▶ Play** or drag the **slider** below the graph"
+                )
+            else:
+                fig = build_graph_figure(G, pos)
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": True})
         else:
-            fig = build_graph_figure(G, pos)
-            st.plotly_chart(fig, use_container_width=True,
-                            config={"displayModeBar": False, "scrollZoom": True})
+            st.info("Build a network from the sidebar to start simulation.")
 
-    # Model comparison
+    with info_col:
+        st.markdown("### 🤖 Agent Analysis")
+        run_metrics = st.session_state.last_run_metrics
+        if run_metrics:
+            badge_map = {
+                "gpt_ok": "GPT OK",
+                "gpt_cached": "GPT Cached",
+                "gpt_retry_ok": "GPT Retry OK",
+                "gpt_fallback_ok": "GPT Fallback OK",
+                "gpt_failed": "GPT Failed",
+                "gpt_failed_local_fallback": "GPT Failed (Local Fallback)",
+                "local_fast_mode": "Local Fast Mode",
+                "local_only": "Local Only",
+                "parse_failed": "Parse Failed",
+                "out_of_scope": "Out Of Scope",
+                "gpt_policy_block_local": "GPT Blocked (Local Only)",
+                "gpt_policy_block_parse_failed": "GPT Blocked + Parse Failed",
+                "cancelled": "Cancelled",
+            }
+            st.caption(f"Last run: {badge_map.get(run_metrics.get('state', ''), run_metrics.get('state', 'n/a'))}")
+            tcols = st.columns(5)
+            tcols[0].metric("Total", f"{run_metrics.get('total_sec', 0.0):.1f}s")
+            local_val = run_metrics.get("local_sec")
+            tcols[1].metric("Local", f"{local_val:.1f}s" if isinstance(local_val, float) else "n/a")
+            gpt_val = run_metrics.get("gpt_sec")
+            tcols[2].metric("GPT", f"{gpt_val:.1f}s" if isinstance(gpt_val, float) else "n/a")
+            tcols[3].metric("Engine", run_metrics.get("engine", "n/a"))
+            c_rounds = run_metrics.get("critic_rounds")
+            tcols[4].metric("Critic rounds", str(c_rounds) if c_rounds else "n/a")
+
+        if st.session_state.agent_messages:
+            for name, icon, css, text in st.session_state.agent_messages:
+                agent_message(name, icon, css, text)
+        else:
+            st.info("Type a question below, use a **Crisis Preset**, or click **Build** → **Shock**.")
+
+        if st.session_state.compare_rows_local:
+            st.markdown("### 🧮 Deterministic Compare")
+            compare_df = build_compare_rows_df(st.session_state.compare_rows_local)
+            if not compare_df.empty:
+                st.dataframe(
+                    compare_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "avg_stress_pct": st.column_config.ProgressColumn(
+                            "avg_stress_pct", min_value=0, max_value=100, format="%.2f%%"
+                        ),
+                    },
+                )
+                meta = st.session_state.compare_meta or {}
+                req = len(meta.get("requested_tickers", []))
+                ev = len(meta.get("evaluated_tickers", []))
+                if req > ev:
+                    st.caption(
+                        f"Compared {ev}/{req} tickers (limit {meta.get('max_tickers', MAX_COMPARE_TICKERS)} per run)."
+                    )
+
+with tab_dashboard:
+    st.markdown("### 🛰️ Live Risk Dashboard")
+    if st.session_state.shock_result and st.session_state.graph_data:
+        sr = st.session_state.shock_result
+        gd = st.session_state.graph_data
+        summary = sr.summary()
+        total_nodes = int(gd["metrics"]["n_nodes"])
+
+        gauge_fig, risk_index, risk_label = build_systemic_risk_gauge_figure(sr, total_nodes)
+        affected_pct = (summary["n_affected"] / max(1, total_nodes)) * 100.0
+
+        kcols = st.columns(6)
+        kcols[0].metric("Affected", f"{summary['n_affected']}/{total_nodes}", f"{affected_pct:.1f}%")
+        kcols[1].metric("Defaulted", summary["n_defaulted"])
+        kcols[2].metric("Waves", summary["cascade_depth"])
+        kcols[3].metric("Total Stress", f"{summary['total_stress']:.2f}")
+        kcols[4].metric("Avg Stress", f"{summary['avg_stress']*100:.1f}%")
+        kcols[5].metric("Risk Index", f"{risk_index:.0f}", risk_label)
+
+        dcol1, dcol2 = st.columns([2, 1])
+        with dcol1:
+            st.plotly_chart(build_sector_impact_bar_figure(sr), use_container_width=True, config={"displayModeBar": False})
+        with dcol2:
+            st.plotly_chart(build_stress_tier_donut_figure(sr), use_container_width=True, config={"displayModeBar": False})
+
+        dcol3, dcol4 = st.columns([1, 2])
+        with dcol3:
+            st.plotly_chart(gauge_fig, use_container_width=True, config={"displayModeBar": False})
+        with dcol4:
+            st.plotly_chart(build_wave_trend_figure(sr), use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("Run a shock scenario to populate the live dashboard.")
+
+    st.divider()
+    st.markdown("### ⚖️ Model Comparison")
     if st.session_state.comparison:
-        st.markdown("### ⚖️ Model Comparison")
         comp = st.session_state.comparison
         comp_rows = []
         for model_name, res in comp.items():
             s = res.summary()
-            comp_rows.append({
-                "Model": model_name.replace("_", " ").title(),
-                "Affected": s["n_affected"],
-                "Defaulted": s["n_defaulted"],
-                "Waves": s["cascade_depth"],
-                "Avg Stress %": round(s["avg_stress"] * 100, 1),
-                "Total Stress": round(s["total_stress"], 1),
-            })
+            comp_rows.append(
+                {
+                    "Model": model_name.replace("_", " ").title(),
+                    "Affected": s["n_affected"],
+                    "Defaulted": s["n_defaulted"],
+                    "Waves": s["cascade_depth"],
+                    "Avg Stress %": round(s["avg_stress"] * 100, 1),
+                    "Total Stress": round(s["total_stress"], 1),
+                }
+            )
         comp_df = pd.DataFrame(comp_rows)
-        st.dataframe(comp_df, use_container_width=True, hide_index=True,
-                      column_config={
-                          "Avg Stress %": st.column_config.ProgressColumn(
-                              min_value=0, max_value=100, format="%.1f%%"),
-                      })
+        st.dataframe(
+            comp_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Avg Stress %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
+            },
+        )
 
-        # Bar chart comparison
         fig_comp = go.Figure()
-        model_colors = {"Linear Threshold": "#4fc3f7", "Debtrank": "#ff8a65", "Cascade Removal": "#ce93d8"}
         for _, row in comp_df.iterrows():
-            fig_comp.add_trace(go.Bar(
-                name=row["Model"],
-                x=["Affected", "Defaulted", "Waves"],
-                y=[row["Affected"], row["Defaulted"], row["Waves"]],
-                marker_color=model_colors.get(row["Model"], "#888"),
-                text=[row["Affected"], row["Defaulted"], row["Waves"]],
-                textposition="auto",
-            ))
+            fig_comp.add_trace(
+                go.Bar(
+                    name=row["Model"],
+                    x=["Affected", "Defaulted", "Waves"],
+                    y=[row["Affected"], row["Defaulted"], row["Waves"]],
+                    marker_color=MODEL_COLORS.get(row["Model"], RISK_COLORS["none"]),
+                    text=[row["Affected"], row["Defaulted"], row["Waves"]],
+                    textposition="auto",
+                )
+            )
         fig_comp.update_layout(
-            barmode="group", height=250,
+            barmode="group",
+            height=260,
             margin=dict(l=40, r=20, t=20, b=30),
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color="#8b95a5", size=11)),
-            xaxis=dict(color="#8b95a5"), yaxis=dict(color="#8b95a5", showgrid=True, gridcolor="#1a1f2e"),
+            plot_bgcolor=PALETTE["bg_main"],
+            paper_bgcolor=PALETTE["bg_main"],
+            font=dict(color=PALETTE["text_primary"]),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, font=dict(color=PALETTE["text_muted"], size=11)),
+            xaxis=dict(color=PALETTE["text_muted"]),
+            yaxis=dict(color=PALETTE["text_muted"], showgrid=True, gridcolor=PALETTE["surface_1"]),
         )
         st.plotly_chart(fig_comp, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.caption("Run `Compare All 3 Models` from the sidebar to populate this section.")
 
-    # Network timeline
     st.markdown("### 📈 Network Health Timeline")
     timeline_fig = build_timeline_figure()
     if timeline_fig:
         st.plotly_chart(timeline_fig, use_container_width=True, config={"displayModeBar": False})
 
-
-with info_col:
-    st.markdown("### 🤖 Agent Analysis")
-    run_metrics = st.session_state.last_run_metrics
-    if run_metrics:
-        badge_map = {
-            "gpt_ok": "GPT OK",
-            "gpt_cached": "GPT Cached",
-            "gpt_retry_ok": "GPT Retry OK",
-            "gpt_fallback_ok": "GPT Fallback OK",
-            "gpt_failed": "GPT Failed (Local Fallback)",
-            "gpt_failed_local_fallback": "GPT Failed (Local Fallback)",
-            "local_fast_mode": "Local Fast Mode",
-            "local_only": "Local Only",
-            "parse_failed": "Parse Failed",
-            "out_of_scope": "Out Of Scope",
-            "gpt_policy_block_local": "GPT Blocked (Local Only)",
-            "gpt_policy_block_parse_failed": "GPT Blocked + Parse Failed",
-            "cancelled": "Cancelled",
-        }
-        st.caption(f"Last run: {badge_map.get(run_metrics.get('state', ''), run_metrics.get('state', 'n/a'))}")
-        tcols = st.columns(4)
-        tcols[0].metric("Total", f"{run_metrics.get('total_sec', 0.0):.1f}s")
-        local_val = run_metrics.get("local_sec")
-        tcols[1].metric("Local", f"{local_val:.1f}s" if isinstance(local_val, float) else "n/a")
-        gpt_val = run_metrics.get("gpt_sec")
-        tcols[2].metric("GPT", f"{gpt_val:.1f}s" if isinstance(gpt_val, float) else "n/a")
-        tcols[3].metric("Engine", run_metrics.get("engine", "n/a"))
-
-    if st.session_state.agent_messages:
-        for name, icon, css, text in st.session_state.agent_messages:
-            agent_message(name, icon, css, text)
-    else:
-        st.info("Type a question below, use a **Crisis Preset**, or click **Build** → **Shock**.")
-
-    if st.session_state.compare_rows_local:
-        st.markdown("### 🧮 Deterministic Compare")
-        compare_df = build_compare_rows_df(st.session_state.compare_rows_local)
-        if not compare_df.empty:
+    if st.session_state.commander_results:
+        st.markdown("### 🧭 Scenario Commander")
+        cmd = st.session_state.commander_results
+        st.caption(
+            f"Date {cmd.get('date')} | Regime {cmd.get('regime')} (VIX {cmd.get('vix', 0.0):.1f}) | "
+            f"Shock {cmd.get('shock_pct')}% via {cmd.get('model')}"
+        )
+        cmd_df = pd.DataFrame(cmd.get("rows", []))
+        if not cmd_df.empty:
+            show_cols = [c for c in ["rank", "ticker", "sector", "risk_score", "n_affected", "cascade_depth", "avg_stress_pct"] if c in cmd_df.columns]
             st.dataframe(
-                compare_df,
+                cmd_df[show_cols],
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "avg_stress_pct": st.column_config.ProgressColumn(
-                        "avg_stress_pct", min_value=0, max_value=100, format="%.2f%%"
-                    ),
+                    "risk_score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                    "avg_stress_pct": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
                 },
             )
-            meta = st.session_state.compare_meta or {}
-            req = len(meta.get("requested_tickers", []))
-            ev = len(meta.get("evaluated_tickers", []))
-            if req > ev:
-                st.caption(
-                    f"Compared {ev}/{req} tickers (limit {meta.get('max_tickers', MAX_COMPARE_TICKERS)} per run)."
-                )
 
-    if st.session_state.show_explainability and st.session_state.run_trace:
+    if st.session_state.autonomous_results:
+        st.markdown("### 🛰️ Autonomous Stress Test")
+        auto = st.session_state.autonomous_results
+        st.caption(
+            f"Seed tickers: {len(auto.get('seed_tickers', []))} | "
+            f"Shock grid: {auto.get('shock_grid')} | Model: {auto.get('model')}"
+        )
+        auto_df = pd.DataFrame(auto.get("rows", []))
+        if not auto_df.empty:
+            show_cols = [c for c in ["ticker", "sector", "shock_pct", "risk_score", "n_affected", "cascade_depth", "avg_stress_pct"] if c in auto_df.columns]
+            st.dataframe(
+                auto_df[show_cols],
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "risk_score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                    "avg_stress_pct": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
+                },
+            )
+
+    if st.session_state.portfolio_copilot:
+        st.markdown("### 📦 Portfolio Co-Pilot")
+        cop = st.session_state.portfolio_copilot
+        if not cop.get("ok"):
+            errs = cop.get("errors", [])
+            st.warning("Portfolio input not valid." + (" " + " | ".join(errs[:4]) if errs else ""))
+        else:
+            st.caption(
+                f"Expected stress: {cop.get('expected_stress_pct', 0.0):.1f}% "
+                f"→ {cop.get('expected_stress_pct_after_hedge', 0.0):.1f}% after hedge "
+                f"(avoided ~{cop.get('estimated_loss_avoided_pct', 0.0):.1f}%)."
+            )
+            formula_md = ui_panels.business_kpi_formula_markdown(cop.get("kpi"))
+            if formula_md:
+                st.markdown(formula_md)
+            pos_df = pd.DataFrame(cop.get("positions", []))
+            if not pos_df.empty:
+                show_cols = [
+                    c for c in
+                    ["ticker", "sector", "weight_norm_pct", "risk_score", "weighted_risk", "avg_stress_pct", "n_affected", "cascade_depth"]
+                    if c in pos_df.columns
+                ]
+                st.dataframe(
+                    pos_df[show_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "weight_norm_pct": st.column_config.ProgressColumn(min_value=-100, max_value=100, format="%.2f%%"),
+                        "risk_score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f"),
+                        "avg_stress_pct": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
+                    },
+                )
+            if cop.get("actions"):
+                st.markdown("**Suggested Hedge Actions**")
+                for action in cop["actions"][:6]:
+                    st.markdown(f"- {action}")
+
+    if st.session_state.shock_result:
+        sr = st.session_state.shock_result
+        st.markdown("### 📊 Sector Impact")
+        sev_df = build_severity_df(sr)
+        st.dataframe(
+            sev_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"Avg Stress %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%")},
+        )
+
+        st.markdown("### 🎯 Most Vulnerable")
+        affected = sr.affected_nodes[:10]
+        if affected:
+            df = pd.DataFrame(affected, columns=["Ticker", "Stress"])
+            df["Sector"] = df["Ticker"].map(st.session_state.sector_dict)
+            df["Stress %"] = (df["Stress"] * 100).round(1)
+            st.dataframe(
+                df[["Ticker", "Sector", "Stress %"]],
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Stress %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%")},
+            )
+
+with tab_explain:
+    if not st.session_state.show_explainability:
+        st.info("Enable `Show explainability panel` from `Settings` to view trace details.")
+    elif st.session_state.run_trace:
         trace = st.session_state.run_trace
         st.markdown("### 🔍 Explainability")
         p = trace.get("policy", {})
@@ -3119,23 +4342,53 @@ with info_col:
         xcols[0].metric("Route", r.get("state", "n/a"))
         xcols[1].metric("Cache hit", "Yes" if p.get("cache_hit") else "No")
         xcols[2].metric("In scope", "Yes" if trace.get("in_scope") else "No")
+        planned_steps = p.get("planned_steps") or st.session_state.latest_policy_plan
+        exec_rows = p.get("executor_log") or st.session_state.latest_executor_log
+        planner_status = "PASS" if planned_steps else "N/A"
+        executor_status = "PASS" if exec_rows else "N/A"
+        critic_approved = r.get("critic_approved")
+        critic_rounds = r.get("critic_rounds")
+        badges_html = " ".join(
+            [
+                ui_panels.stage_badge_html("Planner", planner_status),
+                ui_panels.stage_badge_html("Executor", executor_status),
+                ui_panels.critic_badge_html(critic_approved, critic_rounds),
+            ]
+        )
+        st.markdown(badges_html, unsafe_allow_html=True)
 
         with st.expander("Decision policy", expanded=False):
-            st.json({
-                "scope_reason": trace.get("scope_reason"),
-                "complex_query": trace.get("complex_query"),
-                "router": p.get("router"),
-                "workflow": trace.get("workflow"),
-                "strategy": p.get("strategy"),
-                "should_run_gpt": p.get("should_run_gpt"),
-                "gpt_access_allowed": p.get("gpt_access_allowed"),
-                "gpt_access_reason": p.get("gpt_access_reason"),
-                "gpt_block_reason": p.get("gpt_block_reason", "none"),
-                "cache_mode": p.get("cache_mode", "n/a"),
-                "facts_mode": p.get("facts_mode", "none"),
-                "engine": r.get("engine"),
-                "timings": t,
-            })
+            st.json(
+                {
+                    "scope_reason": trace.get("scope_reason"),
+                    "complex_query": trace.get("complex_query"),
+                    "router": p.get("router"),
+                    "workflow": trace.get("workflow"),
+                    "strategy": p.get("strategy"),
+                    "should_run_gpt": p.get("should_run_gpt"),
+                    "gpt_access_allowed": p.get("gpt_access_allowed"),
+                    "gpt_access_reason": p.get("gpt_access_reason"),
+                    "gpt_block_reason": p.get("gpt_block_reason", "none"),
+                    "cache_mode": p.get("cache_mode", "n/a"),
+                    "facts_mode": p.get("facts_mode", "none"),
+                    "planned_steps_count": len(p.get("planned_steps", []) or []),
+                    "session_memory_enabled": st.session_state.use_session_memory,
+                    "critic_auto_repair": st.session_state.critic_auto_repair,
+                    "engine": r.get("engine"),
+                    "timings": t,
+                }
+            )
+
+        with st.expander("Policy ↔ Executor Split", expanded=False):
+            if planned_steps:
+                st.markdown("**Policy Plan**")
+                for idx, step_text in enumerate(planned_steps, start=1):
+                    st.markdown(f"{idx}. {step_text}")
+            if exec_rows:
+                st.markdown("**Executor Timeline**")
+                st.dataframe(pd.DataFrame(exec_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No executor timeline available yet.")
 
         with st.expander("Execution trace", expanded=False):
             events = trace.get("events", [])
@@ -3148,79 +4401,84 @@ with info_col:
             with st.expander("Deterministic facts injected into GPT", expanded=False):
                 st.code(p["facts_preview"], language="text")
 
-        history = st.session_state.run_trace_history
-        if history:
-            states = [h.get("result", {}).get("state", "n/a") for h in history]
-            hcols = st.columns(3)
-            hcols[0].metric("Runs tracked", len(history))
-            hcols[1].metric("GPT success", f"{sum(1 for h in history if h.get('result', {}).get('gpt_success'))}/{len(history)}")
-            hcols[2].metric("Avg total", f"{np.mean([h.get('timings', {}).get('total_sec', 0.0) for h in history]):.1f}s")
-            st.caption("Recent route states: " + ", ".join(pd.Series(states).value_counts().head(4).index.tolist()))
-            st.caption(
-                f"Session GPT calls: {st.session_state.gpt_calls_total_session} | "
-                f"Policy throttles: {st.session_state.gpt_rate_limit_hits} | "
-                f"Fail streak: {st.session_state.gpt_fail_streak}"
-            )
+        if st.session_state.rag_last_docs:
+            with st.expander("Evidence-RAG retrieval", expanded=False):
+                rag_df = pd.DataFrame(st.session_state.rag_last_docs)
+                show_cols = [c for c in ["reference_id", "source", "title", "score", "text"] if c in rag_df.columns]
+                st.dataframe(rag_df[show_cols], use_container_width=True, hide_index=True)
 
-            quality = summarize_quality(history)
-            if quality:
-                st.markdown("### ✅ Run Quality")
-                qcols = st.columns(5)
-                qcols[0].metric("Factual", f"{quality['factual_consistency_pct']:.1f}%" if quality["factual_consistency_pct"] is not None else "n/a")
-                qcols[1].metric("Fallback rate", f"{quality['fallback_rate_pct']:.1f}%")
-                qcols[2].metric("Cache hit", f"{quality['cache_hit_rate_pct']:.1f}%")
-                qcols[3].metric("429 events", str(quality["rate_limit_events_total"]))
-                qcols[4].metric("Avg uncertainty", f"{quality['avg_uncertainty']:.2f}")
+        if st.session_state.session_decisions:
+            with st.expander("Session decision memory", expanded=False):
+                mem_df = pd.DataFrame(st.session_state.session_decisions[-20:])
+                st.dataframe(mem_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No trace available yet. Run a query first.")
 
-        if st.session_state.eval_results:
-            st.markdown("### 🧪 Benchmark Results")
-            er = st.session_state.eval_results
-            st.caption(
-                f"{er['n_ok']}/{er['n_queries']} success | "
-                f"avg latency {er['avg_latency_s']:.2f}s | total {er['total_time_s']:.2f}s"
-            )
-            st.dataframe(pd.DataFrame(er["rows"]), use_container_width=True, hide_index=True)
+    history = st.session_state.run_trace_history
+    if history:
+        states = [h.get("result", {}).get("state", "n/a") for h in history]
+        hcols = st.columns(3)
+        hcols[0].metric("Runs tracked", len(history))
+        hcols[1].metric("GPT success", f"{sum(1 for h in history if h.get('result', {}).get('gpt_success'))}/{len(history)}")
+        hcols[2].metric("Avg total", f"{np.mean([h.get('timings', {}).get('total_sec', 0.0) for h in history]):.1f}s")
+        st.caption("Recent route states: " + ", ".join(pd.Series(states).value_counts().head(4).index.tolist()))
+        st.caption(
+            f"Session GPT calls: {st.session_state.gpt_calls_total_session} | "
+            f"Policy throttles: {st.session_state.gpt_rate_limit_hits} | "
+            f"Fail streak: {st.session_state.gpt_fail_streak}"
+        )
 
-        if st.session_state.scenario_eval_results:
-            st.markdown("### 🧩 Scenario Pack Eval")
-            se = st.session_state.scenario_eval_results
-            st.caption(f"{se['n_pass']}/{se['n_scenarios']} PASS ({se['pass_rate_pct']:.1f}%)")
-            st.dataframe(pd.DataFrame(se["rows"]), use_container_width=True, hide_index=True)
+        quality = summarize_quality(history)
+        if quality:
+            st.markdown("### ✅ Run Quality")
+            qcols = st.columns(5)
+            qcols[0].metric("Factual", f"{quality['factual_consistency_pct']:.1f}%" if quality["factual_consistency_pct"] is not None else "n/a")
+            qcols[1].metric("Fallback rate", f"{quality['fallback_rate_pct']:.1f}%")
+            qcols[2].metric("Cache hit", f"{quality['cache_hit_rate_pct']:.1f}%")
+            qcols[3].metric("429 events", str(quality["rate_limit_events_total"]))
+            qcols[4].metric("Avg uncertainty", f"{quality['avg_uncertainty']:.2f}")
 
-        if st.session_state.run_trace:
-            current_query = st.session_state.run_trace.get("query", "")
-            matched = next((s for s in SCENARIO_PACK if s["query"] == current_query), None)
-            if matched:
-                expected = matched["expected_route"]
-                actual = st.session_state.run_trace.get("result", {}).get("state", "n/a")
-                ok = expected in actual or (expected == "gpt" and actual.startswith("gpt_"))
-                st.markdown("### 🎯 Scenario Check")
-                st.caption(f"{matched['name']} | expected: {expected} | actual: {actual} | status: {'PASS' if ok else 'CHECK'}")
+        judge_kpis = build_judge_kpis(history)
+        st.session_state.judge_kpis = judge_kpis
+        if judge_kpis:
+            st.markdown("### 🏁 Judge Dashboard")
+            jcols = st.columns(5)
+            jcols[0].metric("Critic pass-rate", f"{judge_kpis.get('critic_pass_rate_pct', 0.0):.1f}%")
+            jcols[1].metric("Factual consistency", f"{judge_kpis.get('factual_consistency_pct', 0.0):.1f}%")
+            jcols[2].metric("Latency p95", f"{judge_kpis.get('latency_p95_sec', 0.0):.2f}s")
+            jcols[3].metric("Fallback rate", f"{judge_kpis.get('fallback_rate_pct', 0.0):.1f}%")
+            gpt_runs = int(judge_kpis.get("gpt_runs", 0))
+            gpt_ok = int(judge_kpis.get("gpt_success_runs", 0))
+            jcols[4].metric("GPT success", f"{gpt_ok}/{gpt_runs}" if gpt_runs > 0 else "n/a")
+            judge_rows_df = build_judge_run_rows(history, limit=20)
+            if not judge_rows_df.empty:
+                with st.expander("Judge run table (latest 20)", expanded=False):
+                    st.dataframe(judge_rows_df, use_container_width=True, hide_index=True)
+
+    if st.session_state.eval_results:
+        st.markdown("### 🧪 Benchmark Results")
+        er = st.session_state.eval_results
+        st.caption(f"{er['n_ok']}/{er['n_queries']} success | avg latency {er['avg_latency_s']:.2f}s | total {er['total_time_s']:.2f}s")
+        st.dataframe(pd.DataFrame(er["rows"]), use_container_width=True, hide_index=True)
+
+    if st.session_state.scenario_eval_results:
+        st.markdown("### 🧩 Scenario Pack Eval")
+        se = st.session_state.scenario_eval_results
+        st.caption(f"{se['n_pass']}/{se['n_scenarios']} PASS ({se['pass_rate_pct']:.1f}%)")
+        st.dataframe(pd.DataFrame(se["rows"]), use_container_width=True, hide_index=True)
+
+    if st.session_state.run_trace:
+        current_query = st.session_state.run_trace.get("query", "")
+        matched = next((s for s in SCENARIO_PACK if s["query"] == current_query), None)
+        if matched:
+            expected = matched["expected_route"]
+            actual = st.session_state.run_trace.get("result", {}).get("state", "n/a")
+            ok = expected in actual or (expected == "gpt" and actual.startswith("gpt_"))
+            st.markdown("### 🎯 Scenario Check")
+            st.caption(f"{matched['name']} | expected: {expected} | actual: {actual} | status: {'PASS' if ok else 'CHECK'}")
 
     if st.session_state.shock_result:
         sr = st.session_state.shock_result
-
-        # Sector impact
-        st.markdown("### 📊 Sector Impact")
-        sev_df = build_severity_df(sr)
-        st.dataframe(sev_df, use_container_width=True, hide_index=True,
-                      column_config={
-                          "Avg Stress %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
-                      })
-
-        # Top nodes
-        st.markdown("### 🎯 Most Vulnerable")
-        affected = sr.affected_nodes[:10]
-        if affected:
-            df = pd.DataFrame(affected, columns=["Ticker", "Stress"])
-            df["Sector"] = df["Ticker"].map(st.session_state.sector_dict)
-            df["Stress %"] = (df["Stress"] * 100).round(1)
-            st.dataframe(df[["Ticker", "Sector", "Stress %"]], use_container_width=True, hide_index=True,
-                          column_config={
-                              "Stress %": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.1f%%"),
-                          })
-
-        # Download report
         st.divider()
         report = generate_report_text()
         brief_md = generate_report_markdown()
@@ -3228,19 +4486,25 @@ with info_col:
         submission_zip = build_submission_bundle_bytes()
         dcols = st.columns(3)
         dcols[0].download_button(
-            "📥 Report (.txt)", report,
+            "📥 Report (.txt)",
+            report,
             file_name=f"risksentinel_report_{sr.shocked_node}_{st.session_state.graph_data['date']}.txt",
-            mime="text/plain", use_container_width=True,
+            mime="text/plain",
+            use_container_width=True,
         )
         dcols[1].download_button(
-            "📄 Executive Brief (.md)", brief_md,
+            "📄 Executive Brief (.md)",
+            brief_md,
             file_name=f"risksentinel_brief_{sr.shocked_node}_{st.session_state.graph_data['date']}.md",
-            mime="text/markdown", use_container_width=True,
+            mime="text/markdown",
+            use_container_width=True,
         )
         dcols[2].download_button(
-            "🧾 Explainability (.json)", trace_json,
+            "🧾 Explainability (.json)",
+            trace_json,
             file_name=f"risksentinel_trace_{sr.shocked_node}_{st.session_state.graph_data['date']}.json",
-            mime="application/json", use_container_width=True,
+            mime="application/json",
+            use_container_width=True,
         )
         st.download_button(
             "📦 Submission Bundle (.zip)",
@@ -3249,6 +4513,170 @@ with info_col:
             mime="application/zip",
             use_container_width=True,
         )
+
+    if (
+        st.session_state.shock_result
+        or st.session_state.commander_results
+        or st.session_state.autonomous_results
+        or st.session_state.portfolio_copilot
+    ):
+        st.markdown("### 🎬 Action Pack")
+        action_ceo = generate_action_pack_ceo_brief()
+        action_runbook = generate_action_pack_runbook()
+        action_json = generate_action_pack_machine_json()
+        action_date = (
+            (st.session_state.graph_data or {}).get("date")
+            or (st.session_state.commander_results or {}).get("date")
+            or selected_date
+        )
+        acols = st.columns(3)
+        acols[0].download_button(
+            "🧭 CEO Brief (.md)",
+            action_ceo,
+            file_name=f"risksentinel_action_ceo_{action_date}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+        acols[1].download_button(
+            "📋 Risk Runbook (.md)",
+            action_runbook,
+            file_name=f"risksentinel_action_runbook_{action_date}.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
+        acols[2].download_button(
+            "🧩 Machine JSON (.json)",
+            action_json,
+            file_name=f"risksentinel_action_pack_{action_date}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+with tab_settings:
+    st.markdown("### 🤖 GPT Orchestrator Settings")
+    is_agent_ready, agent_err = get_agent_config_status()
+    access_policy = get_gpt_access_policy()
+    can_enable_agent_mode = bool(is_agent_ready and access_policy["allowed"])
+    if can_enable_agent_mode:
+        st.caption("GPT orchestrator available")
+    elif not is_agent_ready:
+        st.caption("GPT orchestrator unavailable (using local fallback)")
+    else:
+        st.caption("GPT locked: judge access code required")
+
+    st.session_state.agent_mode = st.toggle(
+        "Use GPT Orchestrator",
+        value=st.session_state.agent_mode if can_enable_agent_mode else False,
+        disabled=not can_enable_agent_mode,
+        help="When enabled, chat queries are routed to the multi-agent orchestrator (Architect → Quant → Advisor).",
+    )
+    st.session_state.agent_strategy = st.selectbox(
+        "Agent strategy",
+        options=["simple", "orchestrator", "workflow_parallel"],
+        index=["simple", "orchestrator", "workflow_parallel"].index(st.session_state.agent_strategy)
+        if st.session_state.agent_strategy in {"simple", "orchestrator", "workflow_parallel"} else 0,
+        disabled=not st.session_state.agent_mode,
+        help=(
+            "simple = one tool-calling agent. orchestrator = agent-as-tool chain. "
+            "workflow_parallel = control-plane workflow "
+            "(state machine + deterministic evidence + Planner/Architect+Quant/Critic). "
+            "For multi-ticker compare queries, app auto-switches to commentary_direct "
+            "(deterministic local compare + GPT commentary only)."
+        ),
+    )
+    st.session_state.high_quality_mode = st.toggle(
+        "High quality mode (gpt-4o)",
+        value=st.session_state.high_quality_mode,
+        disabled=not st.session_state.agent_mode,
+        help="OFF = use gpt-4o-mini by default for speed and fewer 429. ON = use gpt-4o.",
+    )
+    st.session_state.gpt_for_parseable_queries = st.toggle(
+        "Run GPT on standard shock queries",
+        value=st.session_state.gpt_for_parseable_queries,
+        disabled=not st.session_state.agent_mode,
+        help="If disabled, standard parseable shock queries use fast local engine only.",
+    )
+    st.session_state.critic_auto_repair = st.toggle(
+        "Critic auto-repair loop",
+        value=st.session_state.critic_auto_repair,
+        disabled=not st.session_state.agent_mode,
+        help="When enabled, failed critic checks trigger one automatic revision pass.",
+    )
+    st.session_state.use_session_memory = st.toggle(
+        "Use session memory hints",
+        value=st.session_state.use_session_memory,
+        help="Injects prior decision hints from this session into planner/prompt context.",
+    )
+    st.session_state.risk_profile = st.selectbox(
+        "Risk profile",
+        options=["conservative", "balanced", "aggressive"],
+        index=["conservative", "balanced", "aggressive"].index(st.session_state.risk_profile)
+        if st.session_state.risk_profile in {"conservative", "balanced", "aggressive"} else 1,
+        help="Portfolio posture used by Advisor recommendations.",
+    )
+    st.session_state.agent_timeout_sec = st.slider(
+        "Agent timeout (sec)",
+        min_value=10,
+        max_value=120,
+        value=st.session_state.agent_timeout_sec,
+        step=5,
+        disabled=not st.session_state.agent_mode,
+    )
+
+    if access_policy["gate_enabled"] and not access_policy["allowed"]:
+        judge_code = st.text_input("Judge access code", type="password", placeholder="Enter code")
+        if st.button("Unlock GPT", use_container_width=True):
+            if unlock_judge_access(judge_code):
+                st.session_state.judge_unlock_error = ""
+                st.rerun()
+            else:
+                st.session_state.judge_unlock_error = "Invalid code."
+        if st.session_state.judge_unlock_error:
+            st.error(st.session_state.judge_unlock_error)
+    elif access_policy["gate_enabled"] and access_policy["allowed"]:
+        st.success("Judge access unlocked for this session.")
+
+    try:
+        primary_dep, fallback_dep = get_deployment_routing(st.session_state.high_quality_mode)
+        st.caption(f"Primary: {primary_dep} | Fallback: {fallback_dep}")
+    except Exception:
+        pass
+    if not is_agent_ready and agent_err:
+        st.warning(agent_err)
+
+    if st.button("Run GPT Diagnostic", use_container_width=True, disabled=not can_enable_agent_mode):
+        try:
+            st.session_state.agent_diagnostic = run_gpt_diagnostic()
+        except Exception as exc:
+            st.session_state.agent_diagnostic = f"diagnostic_err={type(exc).__name__}: {exc}"
+    if st.session_state.agent_diagnostic:
+        st.code(st.session_state.agent_diagnostic, language="text")
+
+    rate_cfg_caption = (
+        f"Soft limits: {_get_runtime_int('GPT_MAX_CALLS_PER_MINUTE_SESSION', 8)}/min session, "
+        f"{_get_runtime_int('GPT_MAX_CALLS_PER_MINUTE_GLOBAL', 20)}/min global, "
+        f"{_get_runtime_int('GPT_MAX_CALLS_PER_SESSION', 120)} per session."
+    )
+    st.caption(rate_cfg_caption)
+    st.caption("Tool contract: mcp.tool.result.v1 (MCP-ready JSON envelopes)")
+
+    st.divider()
+    st.markdown("### 🔍 Observability")
+    st.session_state.show_explainability = st.toggle(
+        "Show explainability panel",
+        value=st.session_state.show_explainability,
+    )
+    st.session_state.persist_trace_logs = st.toggle(
+        "Persist traces to JSONL",
+        value=st.session_state.persist_trace_logs,
+        help="Stores each run trace in artifacts/run_traces.jsonl",
+    )
+    bcol1, bcol2 = st.columns(2)
+    if bcol1.button("🧪 Run Local Benchmark", use_container_width=True):
+        with st.spinner("Running benchmark pack..."):
+            st.session_state.eval_results = run_local_benchmark(st.session_state.sel_threshold)
+    if bcol2.button("🧩 Evaluate Scenario Pack", use_container_width=True):
+        st.session_state.scenario_eval_results = run_scenario_pack_eval()
 
 
 # Footer
