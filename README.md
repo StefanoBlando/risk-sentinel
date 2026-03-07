@@ -152,6 +152,8 @@ CHAINLIT_USE_GPT=1 python -m chainlit run apps/chainlit/app.py -w
 
 - Full guide: `docs/streamlit_cloud_setup.md`
 - Secrets template: `.streamlit/secrets.toml.example`
+- If PhD `data/processed` files are not present, app auto-falls back to a deterministic synthetic demo dataset.
+- Optional: set `RISKSENTINEL_DATA_ROOT` in Streamlit secrets/env to point to real processed files.
 
 ### Hackathon Docs
 

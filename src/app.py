@@ -440,9 +440,11 @@ if st.session_state.sector_dict is None or st.session_state.tickers is None:
             "RiskSentinel data files are not available.\n\n"
             f"- Resolved data path: `{paths['final']}`\n"
             f"- Networks path: `{paths['networks']}`\n"
-            f"- RISKSENTINEL_DATA_ROOT: `{paths['env_data_root'] or '(not set)'}`\n\n"
+            f"- RISKSENTINEL_DATA_ROOT: `{paths['env_data_root'] or '(not set)'}`\n"
+            f"- Data mode: `{paths.get('data_mode', 'unknown')}`\n\n"
             "Set `RISKSENTINEL_DATA_ROOT` to a folder containing the processed dataset "
-            "(including `sector_mapping.parquet` and `networks/node_centralities.pkl`).\n\n"
+            "(including `sector_mapping.parquet` and `networks/node_centralities.pkl`).\n"
+            "Or enable synthetic fallback with `RISKSENTINEL_ALLOW_SYNTHETIC_DATA=1`.\n\n"
             f"Technical error: `{type(exc).__name__}: {exc}`"
         )
         st.stop()
@@ -2767,6 +2769,8 @@ def generate_trace_bundle_json() -> str:
 with st.sidebar:
     st.markdown("## 🛡️ RiskSentinel")
     st.caption("Agentic Systemic Risk Simulator")
+    if data_loader.is_synthetic_mode():
+        st.info("Synthetic demo dataset active (cloud-safe fallback).")
     st.divider()
 
     st.markdown("### ⚡ Quick Actions")

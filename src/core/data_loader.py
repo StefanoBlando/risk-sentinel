@@ -1,15 +1,16 @@
 """
 RiskSentinel — Data Loader
 Loads pre-computed data from the PhD topological-stock-prediction project.
-No recomputation needed: correlation matrices, centralities, and network
-metrics are all pre-built (3081 daily snapshots, 210 S&P 500 stocks).
+If those files are unavailable (for example on Streamlit Cloud), it can fall
+back to a deterministic synthetic demo dataset so the app remains runnable.
 """
 
-import pickle
 import os
+import pickle
 from pathlib import Path
 from typing import Optional
 
+import networkx as nx
 import numpy as np
 import pandas as pd
 
@@ -17,6 +18,36 @@ import pandas as pd
 # PATHS — PhD project data (final_version = clean thesis copy)
 # ---------------------------------------------------------------------------
 _LEGACY_PHD_BASE = Path.home() / "Scrivania/PHD/research/active/topological-stock-prediction/CESMA THESIS/network_stock_prediction"
+
+
+# ---------------------------------------------------------------------------
+# SECTOR / TICKER METADATA
+# ---------------------------------------------------------------------------
+SECTOR_COLORS = {
+    "Information Technology": "#1f77b4",
+    "Health Care": "#ff7f0e",
+    "Financials": "#2ca02c",
+    "Consumer Discretionary": "#d62728",
+    "Communication Services": "#9467bd",
+    "Industrials": "#8c564b",
+    "Consumer Staples": "#e377c2",
+    "Energy": "#7f7f7f",
+    "Utilities": "#bcbd22",
+    "Real Estate": "#17becf",
+    "Materials": "#aec7e8",
+}
+
+CRISIS_EVENTS = {
+    "China Crisis 2015": ("2015-08-11", "2016-02-11"),
+    "Brexit 2016": ("2016-06-23", "2016-07-08"),
+    "Volmageddon 2018": ("2018-02-02", "2018-02-14"),
+    "Q4 2018 Selloff": ("2018-10-01", "2018-12-31"),
+    "COVID-19 Crash": ("2020-02-20", "2020-04-07"),
+    "Russia-Ukraine 2022": ("2022-02-24", "2022-03-15"),
+    "Rate Hike 2022": ("2022-09-01", "2022-10-31"),
+    "SVB Crisis 2023": ("2023-03-08", "2023-03-24"),
+    "Japan Carry Trade 2024": ("2024-08-01", "2024-08-15"),
+}
 
 
 def _candidate_processed_dirs() -> list[Path]:
@@ -71,51 +102,266 @@ NETWORKS = FINAL / "networks"
 PHD_BASE = FINAL.parents[2] if len(FINAL.parents) >= 3 else _LEGACY_PHD_BASE
 
 
+def _allow_synthetic_data() -> bool:
+    raw = os.getenv("RISKSENTINEL_ALLOW_SYNTHETIC_DATA", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def is_synthetic_mode() -> bool:
+    """True when data loaders are using generated deterministic demo data."""
+    return _allow_synthetic_data() and (not _is_valid_processed_dir(FINAL))
+
+
 def get_data_root_info() -> dict[str, str]:
-    """Expose resolved data paths for diagnostics/UI."""
+    """Expose resolved data paths and mode for diagnostics/UI."""
     return {
         "final": str(FINAL),
         "networks": str(NETWORKS),
         "env_data_root": os.getenv("RISKSENTINEL_DATA_ROOT", ""),
+        "data_mode": "synthetic_demo" if is_synthetic_mode() else "processed_files",
+        "synthetic_allowed": "true" if _allow_synthetic_data() else "false",
     }
 
 
-# ---------------------------------------------------------------------------
-# SECTOR / TICKER METADATA
-# ---------------------------------------------------------------------------
-SECTOR_COLORS = {
-    "Information Technology": "#1f77b4",
-    "Health Care": "#ff7f0e",
-    "Financials": "#2ca02c",
-    "Consumer Discretionary": "#d62728",
-    "Communication Services": "#9467bd",
-    "Industrials": "#8c564b",
-    "Consumer Staples": "#e377c2",
-    "Energy": "#7f7f7f",
-    "Utilities": "#bcbd22",
-    "Real Estate": "#17becf",
-    "Materials": "#aec7e8",
-}
+def _demo_sector_universe() -> dict[str, list[str]]:
+    return {
+        "Information Technology": ["AAPL", "MSFT", "NVDA", "AMD", "INTC", "CRM"],
+        "Health Care": ["UNH", "JNJ", "PFE", "MRK", "ABBV"],
+        "Financials": ["JPM", "GS", "BAC", "MS", "C", "WFC", "SCHW", "BLK"],
+        "Consumer Discretionary": ["AMZN", "TSLA", "HD", "MCD", "NKE"],
+        "Communication Services": ["GOOGL", "META", "NFLX", "DIS", "T"],
+        "Industrials": ["BA", "CAT", "GE", "HON", "UPS"],
+        "Consumer Staples": ["PG", "KO", "PEP", "WMT", "COST"],
+        "Energy": ["XOM", "CVX", "COP", "SLB", "EOG"],
+        "Utilities": ["NEE", "SO", "DUK", "EXC", "AEP"],
+        "Real Estate": ["AMT", "PLD", "O", "EQIX", "SPG"],
+        "Materials": ["LIN", "APD", "FCX", "NEM", "SHW"],
+    }
 
-CRISIS_EVENTS = {
-    "China Crisis 2015": ("2015-08-11", "2016-02-11"),
-    "Brexit 2016": ("2016-06-23", "2016-07-08"),
-    "Volmageddon 2018": ("2018-02-02", "2018-02-14"),
-    "Q4 2018 Selloff": ("2018-10-01", "2018-12-31"),
-    "COVID-19 Crash": ("2020-02-20", "2020-04-07"),
-    "Russia-Ukraine 2022": ("2022-02-24", "2022-03-15"),
-    "Rate Hike 2022": ("2022-09-01", "2022-10-31"),
-    "SVB Crisis 2023": ("2023-03-08", "2023-03-24"),
-    "Japan Carry Trade 2024": ("2024-08-01", "2024-08-15"),
-}
+
+def _classify_regime(vix: pd.Series) -> pd.Series:
+    bins = [-np.inf, 16.0, 20.0, 25.0, 32.0, np.inf]
+    labels = ["Calm", "Normal", "Elevated", "High", "Crisis"]
+    cat = pd.cut(vix, bins=bins, labels=labels, right=False)
+    return cat.astype(str)
+
+
+def _build_synthetic_dataset() -> dict:
+    rng = np.random.default_rng(20260307)
+
+    sector_universe = _demo_sector_universe()
+    sectors = list(sector_universe.keys())
+    tickers = [t for sec in sectors for t in sector_universe[sec]]
+    n_tickers = len(tickers)
+
+    sector_lookup = {ticker: sector for sector, names in sector_universe.items() for ticker in names}
+    sector_idx = np.array([sectors.index(sector_lookup[t]) for t in tickers], dtype=int)
+
+    all_dates = pd.bdate_range("2018-01-02", "2025-12-31")
+    n_days = len(all_dates)
+
+    # Factor model: market + sector + idiosyncratic components.
+    cyc = 1.0 + 0.65 * np.maximum(0.0, np.sin(np.linspace(0, 18 * np.pi, n_days)))
+    market_factor = rng.normal(0.0, 0.006, size=n_days) * cyc
+    sector_factors = rng.normal(0.0, 0.0045, size=(n_days, len(sectors))) * cyc[:, None]
+    idio = rng.normal(0.0, 0.0105, size=(n_days, n_tickers)) * (0.75 + 0.35 * cyc[:, None])
+
+    beta_m = rng.uniform(0.70, 1.25, size=n_tickers)
+    beta_s = rng.uniform(0.45, 1.05, size=n_tickers)
+
+    returns_np = market_factor[:, None] * beta_m
+    returns_np += sector_factors[:, sector_idx] * beta_s
+    returns_np += idio
+    returns_np = np.clip(returns_np, -0.22, 0.22)
+
+    returns = pd.DataFrame(returns_np, index=all_dates, columns=tickers)
+
+    base_prices = rng.uniform(40.0, 240.0, size=n_tickers)
+    close_prices = (1.0 + returns).cumprod()
+    close_prices = close_prices.mul(base_prices, axis=1)
+
+    sp500_ret = (returns.mean(axis=1) + rng.normal(0.0, 0.0015, size=n_days)).clip(-0.12, 0.12)
+    sp500 = 4200.0 * (1.0 + sp500_ret).cumprod()
+
+    rolling_vol = sp500_ret.rolling(20, min_periods=5).std().bfill().fillna(0.01)
+    vix = (11.0 + 950.0 * rolling_vol + 3.0 * np.maximum(0.0, np.sin(np.linspace(0, 12 * np.pi, n_days)))).clip(10.0, 55.0)
+    regime = _classify_regime(vix)
+    csad = returns.abs().mean(axis=1)
+
+    market_data = pd.DataFrame(
+        {
+            "VIX": vix.astype(float),
+            "SP500": sp500.astype(float),
+            "SP500_Return": sp500_ret.astype(float),
+        },
+        index=all_dates,
+    )
+
+    regime_data = market_data.copy()
+    regime_data["Regime"] = regime
+    regime_data["CSAD"] = csad.astype(float)
+
+    # Build monthly snapshots with 60-day rolling correlations.
+    candidate_snapshots = pd.bdate_range(all_dates[80], all_dates[-1], freq="BMS")
+    snapshot_dates: list[pd.Timestamp] = []
+    corr_matrices: dict[pd.Timestamp, pd.DataFrame] = {}
+    node_centralities: dict[pd.Timestamp, dict[str, dict[str, float]]] = {}
+    metrics_rows: list[dict] = []
+
+    for d in candidate_snapshots:
+        pos = int(all_dates.get_indexer([d], method="nearest")[0])
+        if pos < 59:
+            continue
+
+        date_ts = pd.Timestamp(all_dates[pos])
+        window = returns.iloc[pos - 59: pos + 1]
+        corr = window.corr().fillna(0.0)
+        np.fill_diagonal(corr.values, 1.0)
+
+        snapshot_dates.append(date_ts)
+        corr_matrices[date_ts] = corr
+
+        G = nx.Graph()
+        for ticker in tickers:
+            G.add_node(ticker)
+        values = corr.values
+        for i in range(n_tickers):
+            for j in range(i + 1, n_tickers):
+                w = float(values[i, j])
+                abs_w = abs(w)
+                if abs_w >= 0.35:
+                    G.add_edge(tickers[i], tickers[j], weight=w, abs_weight=abs_w)
+
+        degree = nx.degree_centrality(G)
+        k_sample = max(5, min(20, max(1, G.number_of_nodes() - 1)))
+        betweenness = nx.betweenness_centrality(G, k=k_sample, seed=42)
+        closeness = nx.closeness_centrality(G)
+        pagerank = nx.pagerank(G, weight="abs_weight") if G.number_of_edges() else {n: 0.0 for n in G.nodes()}
+        try:
+            eigenvector = nx.eigenvector_centrality_numpy(G, weight="abs_weight") if G.number_of_edges() else {n: 0.0 for n in G.nodes()}
+        except Exception:
+            eigenvector = {n: 0.0 for n in G.nodes()}
+
+        node_centralities[date_ts] = {
+            ticker: {
+                "degree": float(degree.get(ticker, 0.0)),
+                "betweenness": float(betweenness.get(ticker, 0.0)),
+                "closeness": float(closeness.get(ticker, 0.0)),
+                "eigenvector": float(eigenvector.get(ticker, 0.0)),
+                "pagerank": float(pagerank.get(ticker, 0.0)),
+            }
+            for ticker in tickers
+        }
+
+        n_nodes = G.number_of_nodes()
+        n_edges = G.number_of_edges()
+        abs_weights = [float(attrs.get("abs_weight", 0.0)) for _, _, attrs in G.edges(data=True)]
+        signed_weights = [float(attrs.get("weight", 0.0)) for _, _, attrs in G.edges(data=True)]
+
+        if n_nodes > 0:
+            comps = list(nx.connected_components(G))
+            largest_cc = max((len(c) for c in comps), default=0)
+            n_components = len(comps)
+            avg_degree = float(np.mean([deg for _, deg in G.degree()]))
+            avg_clustering = float(nx.average_clustering(G)) if n_edges else 0.0
+        else:
+            largest_cc = 0
+            n_components = 0
+            avg_degree = 0.0
+            avg_clustering = 0.0
+
+        metrics_rows.append(
+            {
+                "date": date_ts,
+                "nodes": int(n_nodes),
+                "edges": int(n_edges),
+                "density": float(nx.density(G)) if n_nodes > 1 else 0.0,
+                "avg_degree": avg_degree,
+                "avg_clustering": avg_clustering,
+                "n_components": int(n_components),
+                "largest_cc": int(largest_cc),
+                "largest_cc_pct": float(largest_cc / n_nodes) if n_nodes else 0.0,
+                "avg_weight": float(np.mean(signed_weights)) if signed_weights else 0.0,
+                "avg_abs_weight": float(np.mean(abs_weights)) if abs_weights else 0.0,
+                "method": "synthetic_demo",
+                "vix": float(market_data.loc[date_ts, "VIX"]),
+                "regime": str(regime_data.loc[date_ts, "Regime"]),
+            }
+        )
+
+    network_metrics = pd.DataFrame(metrics_rows).set_index("date").sort_index()
+
+    network_features = pd.DataFrame(index=network_metrics.index)
+    network_features["density"] = network_metrics["density"]
+    network_features["avg_degree"] = network_metrics["avg_degree"]
+    network_features["avg_clustering"] = network_metrics["avg_clustering"]
+    network_features["largest_cc_pct"] = network_metrics["largest_cc_pct"]
+    network_features["vix"] = network_metrics["vix"]
+    network_features["density_delta_5"] = network_features["density"].diff(5).fillna(0.0)
+    network_features["avg_degree_delta_5"] = network_features["avg_degree"].diff(5).fillna(0.0)
+    network_features["systemic_pressure"] = (network_features["density"] * network_features["vix"]).astype(float)
+
+    sector_mapping = pd.DataFrame(
+        {"Ticker": tickers, "Sector": [sector_lookup[t] for t in tickers]}
+    )
+
+    sector_rows: list[dict] = []
+    for date_ts in snapshot_dates:
+        cdf = pd.DataFrame.from_dict(node_centralities[date_ts], orient="index")
+        cdf["Sector"] = cdf.index.map(sector_lookup)
+        grouped = cdf.groupby("Sector")[["degree", "betweenness", "closeness", "eigenvector", "pagerank"]].mean()
+        row: dict[str, float | str | pd.Timestamp] = {"date": date_ts}
+        for sector_name in sectors:
+            if sector_name not in grouped.index:
+                continue
+            vals = grouped.loc[sector_name]
+            prefix = sector_name.lower().replace(" ", "_")
+            row[f"{prefix}_degree"] = float(vals["degree"])
+            row[f"{prefix}_betweenness"] = float(vals["betweenness"])
+            row[f"{prefix}_pagerank"] = float(vals["pagerank"])
+        sector_rows.append(row)
+
+    sector_centrality_features = pd.DataFrame(sector_rows).set_index("date").sort_index()
+
+    return {
+        "sector_mapping": sector_mapping,
+        "close_prices": close_prices,
+        "returns_simple": returns,
+        "market_data": market_data,
+        "regime_data": regime_data,
+        "network_metrics": network_metrics,
+        "network_features": network_features,
+        "sector_centrality_features": sector_centrality_features,
+        "correlation_matrices": corr_matrices,
+        "node_centralities": node_centralities,
+    }
+
+
+_SYNTHETIC_CACHE: Optional[dict] = None
+
+
+def _synthetic_data() -> dict:
+    global _SYNTHETIC_CACHE
+    if _SYNTHETIC_CACHE is None:
+        _SYNTHETIC_CACHE = _build_synthetic_dataset()
+    return _SYNTHETIC_CACHE
+
+
+def _load_parquet_or_synthetic(filename: str, synthetic_key: str) -> pd.DataFrame:
+    path = FINAL / filename
+    if path.is_file():
+        return pd.read_parquet(path)
+    if is_synthetic_mode():
+        return _synthetic_data()[synthetic_key].copy()
+    return pd.read_parquet(path)
 
 
 # ---------------------------------------------------------------------------
 # LIGHTWEIGHT LOADERS (parquet — fast, <100 MB total)
 # ---------------------------------------------------------------------------
 def load_sector_mapping() -> pd.DataFrame:
-    """Ticker → Sector mapping (210 stocks, 11 GICS sectors)."""
-    return pd.read_parquet(FINAL / "sector_mapping.parquet")
+    """Ticker → Sector mapping."""
+    return _load_parquet_or_synthetic("sector_mapping.parquet", "sector_mapping")
 
 
 def get_sector_dict() -> dict[str, str]:
@@ -125,50 +371,44 @@ def get_sector_dict() -> dict[str, str]:
 
 
 def get_ticker_list() -> list[str]:
-    """Returns sorted list of 210 tickers."""
+    """Returns sorted ticker list."""
     sm = load_sector_mapping()
     return sorted(sm["Ticker"].tolist())
 
 
 def load_close_prices() -> pd.DataFrame:
-    """Daily adjusted close prices (3140 days × 210 stocks)."""
-    return pd.read_parquet(FINAL / "close_prices.parquet")
+    """Daily adjusted close prices."""
+    return _load_parquet_or_synthetic("close_prices.parquet", "close_prices")
 
 
 def load_returns() -> pd.DataFrame:
-    """Daily simple returns (3140 × 210)."""
-    return pd.read_parquet(FINAL / "returns_simple.parquet")
+    """Daily simple returns."""
+    return _load_parquet_or_synthetic("returns_simple.parquet", "returns_simple")
 
 
 def load_market_data() -> pd.DataFrame:
-    """VIX, SP500, SP500_Return (3140 rows)."""
-    return pd.read_parquet(FINAL / "market_data.parquet")
+    """VIX, SP500, SP500_Return."""
+    return _load_parquet_or_synthetic("market_data.parquet", "market_data")
 
 
 def load_regime_data() -> pd.DataFrame:
-    """VIX + regime labels (Calm/Normal/Elevated/High/Crisis) + CSAD."""
-    return pd.read_parquet(FINAL / "regime_data.parquet")
+    """VIX + regime labels + CSAD."""
+    return _load_parquet_or_synthetic("regime_data.parquet", "regime_data")
 
 
 def load_network_metrics() -> pd.DataFrame:
-    """Global graph metrics time series (3081 × 13).
-    Columns: nodes, edges, density, avg_degree, avg_clustering,
-    n_components, largest_cc, largest_cc_pct, avg_weight, avg_abs_weight,
-    method, vix, regime.
-    """
-    return pd.read_parquet(FINAL / "network_metrics.parquet")
+    """Global graph metrics time series."""
+    return _load_parquet_or_synthetic("network_metrics.parquet", "network_metrics")
 
 
 def load_network_features() -> pd.DataFrame:
-    """Full topological feature matrix (3081 × 182).
-    Includes global metrics, centrality aggregates, delta features.
-    """
-    return pd.read_parquet(FINAL / "network_features.parquet")
+    """Topological feature matrix."""
+    return _load_parquet_or_synthetic("network_features.parquet", "network_features")
 
 
 def load_sector_centralities() -> pd.DataFrame:
-    """Per-sector centrality averages (3081 × 55)."""
-    return pd.read_parquet(FINAL / "sector_centrality_features.parquet")
+    """Per-sector centrality averages."""
+    return _load_parquet_or_synthetic("sector_centrality_features.parquet", "sector_centrality_features")
 
 
 # ---------------------------------------------------------------------------
@@ -179,28 +419,44 @@ _centrality_cache: Optional[dict] = None
 
 
 def load_correlation_matrices() -> dict[pd.Timestamp, pd.DataFrame]:
-    """Pre-computed rolling 60-day Pearson correlation matrices.
-    Returns dict[Timestamp → DataFrame(210×210)].
-    3081 daily snapshots, 2013-09-06 to 2025-12-04.
-    WARNING: ~1 GB on disk, ~3-4 GB in RAM. Cached after first load.
-    """
+    """Pre-computed rolling correlation matrices."""
     global _corr_cache
-    if _corr_cache is None:
-        with open(NETWORKS / "correlation_matrices_pearson.pkl", "rb") as f:
+    if _corr_cache is not None:
+        return _corr_cache
+
+    pkl_path = NETWORKS / "correlation_matrices_pearson.pkl"
+    if pkl_path.is_file():
+        with open(pkl_path, "rb") as f:
             _corr_cache = pickle.load(f)
+        return _corr_cache
+
+    if is_synthetic_mode():
+        _corr_cache = _synthetic_data()["correlation_matrices"]
+        return _corr_cache
+
+    with open(pkl_path, "rb") as f:
+        _corr_cache = pickle.load(f)
     return _corr_cache
 
 
 def load_node_centralities() -> dict[pd.Timestamp, dict[str, dict[str, float]]]:
-    """Pre-computed per-node centralities.
-    Returns dict[Timestamp → {ticker: {degree, betweenness, closeness,
-    eigenvector, pagerank}}].
-    3081 dates × 210 tickers. 38 MB — fast to load. Cached.
-    """
+    """Pre-computed per-node centralities."""
     global _centrality_cache
-    if _centrality_cache is None:
-        with open(NETWORKS / "node_centralities.pkl", "rb") as f:
+    if _centrality_cache is not None:
+        return _centrality_cache
+
+    pkl_path = NETWORKS / "node_centralities.pkl"
+    if pkl_path.is_file():
+        with open(pkl_path, "rb") as f:
             _centrality_cache = pickle.load(f)
+        return _centrality_cache
+
+    if is_synthetic_mode():
+        _centrality_cache = _synthetic_data()["node_centralities"]
+        return _centrality_cache
+
+    with open(pkl_path, "rb") as f:
+        _centrality_cache = pickle.load(f)
     return _centrality_cache
 
 
@@ -222,9 +478,7 @@ def find_nearest_date(target: str, dates: Optional[list] = None) -> pd.Timestamp
 
 
 def get_correlation_matrix(date: str) -> tuple[pd.DataFrame, pd.Timestamp]:
-    """Get 210×210 correlation matrix for a specific date (nearest match).
-    Returns (corr_matrix, actual_date).
-    """
+    """Get correlation matrix for a specific date (nearest match)."""
     corr_matrices = load_correlation_matrices()
     ts = pd.Timestamp(date)
     if ts in corr_matrices:
@@ -234,9 +488,7 @@ def get_correlation_matrix(date: str) -> tuple[pd.DataFrame, pd.Timestamp]:
 
 
 def get_node_centralities_for_date(date: str) -> tuple[dict[str, dict[str, float]], pd.Timestamp]:
-    """Get per-node centralities for a specific date (nearest match).
-    Returns ({ticker: {metric: value}}, actual_date).
-    """
+    """Get per-node centralities for a specific date (nearest match)."""
     centralities = load_node_centralities()
     ts = pd.Timestamp(date)
     if ts in centralities:
@@ -246,10 +498,7 @@ def get_node_centralities_for_date(date: str) -> tuple[dict[str, dict[str, float
 
 
 def centralities_to_dataframe(node_centralities: dict) -> pd.DataFrame:
-    """Convert single-date centrality dict to DataFrame.
-    Input: {ticker: {degree, betweenness, closeness, eigenvector, pagerank}}
-    Output: DataFrame with ticker as index, metrics as columns.
-    """
+    """Convert single-date centrality dict to DataFrame."""
     return pd.DataFrame.from_dict(node_centralities, orient="index")
 
 
@@ -257,11 +506,7 @@ def centralities_to_dataframe(node_centralities: dict) -> pd.DataFrame:
 # CONVENIENCE: LOAD MVP DATASET
 # ---------------------------------------------------------------------------
 def load_mvp_data() -> dict:
-    """Load lightweight data for MVP (no 1 GB correlation pickle).
-    Returns dict with: sector_mapping, market, regimes, network_metrics,
-    network_features, node_centralities.
-    Total: ~50 MB RAM.
-    """
+    """Load lightweight data for MVP/no-recompute flows."""
     return {
         "sector_mapping": load_sector_mapping(),
         "sector_dict": get_sector_dict(),
