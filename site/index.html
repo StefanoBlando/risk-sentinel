@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RiskSentinel | Agentic Systemic Risk Simulator</title>
+  <meta name="description" content="RiskSentinel turns what-if financial shock questions into deterministic contagion analytics and judge-ready explainability." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="bg-glow"></div>
+  <div class="bg-grid"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#top">
+      <span class="brand-mark">RS</span>
+      <span>RiskSentinel</span>
+    </a>
+    <nav class="topnav">
+      <a href="#architecture">Architecture</a>
+      <a href="#demo">2-Min Demo</a>
+      <a href="#proof">Proof</a>
+      <a class="btn btn-small" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero reveal">
+      <p class="eyebrow">Microsoft AI Dev Days Hackathon 2026</p>
+      <h1>Systemic Risk Intelligence<br />for Real-Time Decisions</h1>
+      <p class="subtitle">
+        Ask <em>"What if JPM crashes 40%?"</em> and get deterministic contagion analytics,
+        agentic synthesis, and audit-ready evidence in one flow.
+      </p>
+      <div class="hero-actions">
+        <a class="btn" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">Open Repository</a>
+        <a class="btn btn-ghost" href="#proof">See KPI Snapshot</a>
+      </div>
+      <div class="hero-metrics">
+        <article>
+          <span class="metric" data-count="210">210</span>
+          <p>S&amp;P 500 stocks tracked</p>
+        </article>
+        <article>
+          <span class="metric" data-count="3081">3,081</span>
+          <p>Daily network snapshots</p>
+        </article>
+        <article>
+          <span class="metric" data-count="61">61</span>
+          <p>Unit tests passing</p>
+        </article>
+        <article>
+          <span class="metric">5/5</span>
+          <p>Demo-check scenarios pass</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="showcase reveal">
+      <img src="./assets/risksentinel.jpg" alt="RiskSentinel dashboard screenshot" />
+    </section>
+
+    <section id="architecture" class="cards reveal">
+      <div class="section-head">
+        <p class="eyebrow">Architecture</p>
+        <h2>Deterministic Core + Bounded Agentic Layer</h2>
+      </div>
+      <div class="card-grid">
+        <article class="card">
+          <h3>Control Plane</h3>
+          <p>Explicit state machine: <code>received → local_facts → analysis → critic → finalize</code>.</p>
+        </article>
+        <article class="card">
+          <h3>Tool Gateway</h3>
+          <p>Single deterministic gate with timeout, retries, schema validation, and error taxonomy.</p>
+        </article>
+        <article class="card">
+          <h3>Evidence First</h3>
+          <p>Immutable evidence ledger (<code>E1..En</code>) + RAG context + critic hard gate (max 1 repair).</p>
+        </article>
+        <article class="card">
+          <h3>Agentic Ops</h3>
+          <p>Scenario Commander, Autonomous Stress Test, and Portfolio Co-Pilot for judge-ready flows.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="demo" class="timeline reveal">
+      <div class="section-head">
+        <p class="eyebrow">Live Narrative</p>
+        <h2>Two-Minute Demo Script</h2>
+      </div>
+      <ol>
+        <li><strong>0:00-0:15</strong> Hook with a shock question (JPM -40%).</li>
+        <li><strong>0:15-0:45</strong> Show deterministic cascade: nodes, waves, sector stress.</li>
+        <li><strong>0:45-1:20</strong> Run control-plane flow (Planner → Architect+Quant → Advisor → Critic).</li>
+        <li><strong>1:20-1:45</strong> Open explainability + judge KPIs (pass-rate, consistency, p95 latency).</li>
+        <li><strong>1:45-2:00</strong> Export submission bundle and close with resilience fallback.</li>
+      </ol>
+    </section>
+
+    <section id="proof" class="proof reveal">
+      <div class="section-head">
+        <p class="eyebrow">Proof Of Reliability</p>
+        <h2>What Judges Can Verify Quickly</h2>
+      </div>
+      <div class="proof-grid">
+        <article>
+          <h3>Testing</h3>
+          <p><code>61 passed</code> with coverage across contagion, control plane, gateway, evaluation, RAG, reporting.</p>
+        </article>
+        <article>
+          <h3>Smoke Checks</h3>
+          <p><code>make demo-check</code> validates 5 historical crisis scenarios end-to-end.</p>
+        </article>
+        <article>
+          <h3>Submission Bundle</h3>
+          <p><code>make submission-bundle</code> generates zip + manifest for reproducible packaging.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="links reveal">
+      <div class="section-head">
+        <p class="eyebrow">Submission Links</p>
+        <h2>Ready To Publish</h2>
+      </div>
+      <div class="link-cards">
+        <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">
+          <h3>Repository</h3>
+          <p>Code, architecture docs, tests, and setup.</p>
+        </a>
+        <a class="link-card link-placeholder" href="#" aria-disabled="true">
+          <h3>Live Demo</h3>
+          <p>Add your public Streamlit URL before submission.</p>
+        </a>
+        <a class="link-card link-placeholder" href="#" aria-disabled="true">
+          <h3>Video Demo</h3>
+          <p>Add your public 2-minute video URL.</p>
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Built by Stefano Blando · RiskSentinel · 2026</p>
+  </footer>
+
+  <script src="./app.js"></script>
+</body>
+</html>

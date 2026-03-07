@@ -159,6 +159,14 @@ CHAINLIT_USE_GPT=1 python -m chainlit run apps/chainlit/app.py -w
 - Demo script: `docs/demo_script.md`
 - Architecture diagram: `docs/architecture_diagram.md`
 
+### Project Website (Judge Landing)
+
+```bash
+python -m http.server 8080 --directory site
+```
+
+Open `http://localhost:8080`.
+
 ---
 
 ## Project Structure
@@ -189,6 +197,7 @@ CHAINLIT_USE_GPT=1 python -m chainlit run apps/chainlit/app.py -w
 ├── apps/
 │   └── chainlit/
 │       └── app.py           # Chainlit chat app
+├── site/                    # One-page project landing (GitHub Pages-ready)
 ├── scripts/                 # CLI helpers (demo-check, submission bundle)
 ├── tests/                   # 61 unit tests
 ├── docs/                    # Hackathon submission materials
