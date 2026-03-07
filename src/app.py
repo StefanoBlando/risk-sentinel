@@ -1927,11 +1927,25 @@ def run_agent_query_with_backoff(
 
 
 def get_deployment_routing(high_quality_mode: bool) -> tuple[str, str]:
-    """Return (primary, fallback) deployment names for the current run."""
-    settings = get_settings()
+    """Return (primary, fallback) deployment names for the current run.
+
+    Must never raise when Azure secrets are not configured, so local-only mode
+    remains usable on Streamlit Cloud.
+    """
+    default_primary = _get_runtime_value("AZURE_OPENAI_DEPLOYMENT", "gpt-4o") or "gpt-4o"
+    default_fallback = _get_runtime_value("AZURE_OPENAI_FALLBACK_DEPLOYMENT", "gpt-4o-mini") or "gpt-4o-mini"
+
+    try:
+        settings = get_settings()
+        primary = str(getattr(settings, "AZURE_OPENAI_DEPLOYMENT", "")).strip() or default_primary
+        fallback = str(getattr(settings, "AZURE_OPENAI_FALLBACK_DEPLOYMENT", "")).strip() or default_fallback
+    except Exception:
+        primary = default_primary
+        fallback = default_fallback
+
     if high_quality_mode:
-        return settings.AZURE_OPENAI_DEPLOYMENT, settings.AZURE_OPENAI_FALLBACK_DEPLOYMENT
-    return settings.AZURE_OPENAI_FALLBACK_DEPLOYMENT, settings.AZURE_OPENAI_DEPLOYMENT
+        return primary, fallback
+    return fallback, primary
 
 
 def run_gpt_diagnostic() -> str:
