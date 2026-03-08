@@ -49,10 +49,10 @@ RiskSentinel combines network science and multi-agent orchestration:
 ## Current Status
 - Core app working on Streamlit.
 - Chainlit chat app available (`apps/chainlit/app.py`).
-- Test suite and deterministic demo checks passing.
+- Test suite passing (`65 passed, 1 skipped`) and deterministic demo checks passing.
 
 ## Submission Links
 - Repository: `https://github.com/stefano-blando/risk-sentinel`
 - Project site: `https://stefano-blando.github.io/risk-sentinel/`
 - Live demo app: `https://risk-sentinel-hxq8pzyujwbmbokegefcaq.streamlit.app/`
-- Video demo: to be added after final recording
+- Video demo: pending final public URL

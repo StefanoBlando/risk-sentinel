@@ -160,7 +160,7 @@ CHAINLIT_USE_GPT=1 python -m chainlit run apps/chainlit/app.py -w
 - Repository: `https://github.com/stefano-blando/risk-sentinel`
 - Project site: `https://stefano-blando.github.io/risk-sentinel/`
 - Live demo app: `https://risk-sentinel-hxq8pzyujwbmbokegefcaq.streamlit.app/`
-- Video demo: to be added after recording
+- Video demo: pending final public URL
 
 ### Hackathon Docs
 
@@ -218,7 +218,7 @@ GitHub Pages (auto-deploy from `main`):
 │       └── app.py           # Chainlit chat app
 ├── site/                    # One-page project landing (GitHub Pages-ready)
 ├── scripts/                 # CLI helpers (demo-check, submission bundle)
-├── tests/                   # 61 unit tests
+├── tests/                   # 65 tests (+ 1 optional Azure smoke test skipped by default)
 ├── docs/                    # Hackathon submission materials
 ├── Makefile                 # One-command QA/bundle shortcuts
 ├── requirements.txt
