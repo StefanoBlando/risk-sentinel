@@ -20,9 +20,10 @@
       <span>RiskSentinel</span>
     </a>
     <nav class="topnav">
-      <a href="#architecture">Architecture</a>
+      <a href="#surfaces">Product Surfaces</a>
       <a href="#network-dynamics">Stress Lab</a>
-      <a href="#flow">Control Flow</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#flow">Operator Flow</a>
       <a href="#proof">Audit Signals</a>
       <a href="#links">Links</a>
       <a class="btn btn-small" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">GitHub</a>
@@ -34,19 +35,20 @@
       <div class="hero-grid">
         <div class="hero-copy">
           <p class="eyebrow">Microsoft AI Dev Days Hackathon 2026</p>
-          <h1>Systemic Surveillance for Forward Stress Decisions</h1>
+          <h1>Systemic Surveillance, Forward Stress Tests, and Intervention Analysis</h1>
           <p class="subtitle">
-            Ask <em>"What if JPM crashes 40%?"</em> and get a current systemic state,
-            forward stress playback, intervention analysis, and audit-ready evidence in one run.
+            RiskSentinel now combines live systemic surveillance, outlook monitoring,
+            shock playback, scenario compare, policy intervention tests, and audit-ready evidence
+            in one bounded Streamlit control plane.
           </p>
           <div class="hero-actions">
-            <a class="btn" href="https://github.com/stefano-blando/risk-sentinel" target="_blank" rel="noreferrer">Open Repository</a>
-            <a class="btn btn-ghost" href="#proof">See Verifications</a>
+            <a class="btn" href="https://risk-sentinel-hxq8pzyujwbmbokegefcaq.streamlit.app/" target="_blank" rel="noreferrer">Open Live App</a>
+            <a class="btn btn-ghost" href="#surfaces">See Product Surfaces</a>
           </div>
           <div class="hero-tags">
-            <span>Control Plane Hard Gate</span>
-            <span>Evidence Ledger E1..En</span>
-            <span>Supervisory Readout Layer</span>
+            <span>Systemic Surveillance</span>
+            <span>Forward Stress Testing</span>
+            <span>Intervention Readout</span>
           </div>
         </div>
 
@@ -54,10 +56,10 @@
           <p class="panel-label">Live run status</p>
           <p class="panel-status" id="status-chip">Control plane ready</p>
           <div class="terminal">
-            <p><span>&gt;</span> What if JPM crashes 40% on 2025-12-01?</p>
-            <p><span>&gt;</span> Planner -> Architect + Quant -> Advisor -> Critic</p>
-            <p><span>&gt;</span> Cascade depth: 6 | Affected: 152 | Avg stress: 23.8%</p>
-            <p><span>&gt;</span> Verdict: Approved with deterministic evidence</p>
+            <p><span>&gt;</span> Surface: Surveillance -> Outlook -> Stress Test -> Audit Trail</p>
+            <p><span>&gt;</span> Query: Compare JPM vs GS, then run a forward stress scenario</p>
+            <p><span>&gt;</span> Output: watchlist, vulnerable nodes, scenario compare, intervention readout</p>
+            <p><span>&gt;</span> Verdict: bounded agentic answer with deterministic evidence and critic gate</p>
           </div>
         </aside>
       </div>
@@ -78,6 +80,31 @@
         <article>
           <span class="metric">5/5</span>
           <p>Demo-check scenarios pass</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="surfaces" class="reveal">
+      <div class="section-head">
+        <p class="eyebrow">Product Surfaces</p>
+        <h2>The App Now Works as a Supervisory Cockpit</h2>
+      </div>
+      <div class="card-grid">
+        <article class="card">
+          <h3>Stress Lab</h3>
+          <p>Replay contagion waves, compare models, and inspect affected institutions on the observed network.</p>
+        </article>
+        <article class="card">
+          <h3>Surveillance</h3>
+          <p>Track systemic state, sector pressure, severity tiers, and ranked fragility in one monitoring view.</p>
+        </article>
+        <article class="card">
+          <h3>Outlook</h3>
+          <p>Monitor short-horizon fragility baselines, watchlists, checkpoint outlooks, and synchronized shock playback.</p>
+        </article>
+        <article class="card">
+          <h3>Audit Trail</h3>
+          <p>Inspect execution traces, evidence references, quality signals, and submission-ready export bundles.</p>
         </article>
       </div>
     </section>
@@ -106,65 +133,65 @@
     <section id="architecture" class="reveal">
       <div class="section-head">
         <p class="eyebrow">Architecture</p>
-        <h2>Deterministic Core + Bounded Agentic Layer</h2>
+        <h2>Deterministic Core, Agentic Control Plane, and Policy Layer</h2>
       </div>
       <div class="card-grid">
         <article class="card">
+          <h3>Deterministic Engine</h3>
+          <p>Observed correlation network, contagion propagation, model compare, and intervention simulation stay deterministic.</p>
+        </article>
+        <article class="card">
           <h3>Control Plane</h3>
-          <p>State machine routing with strict transitions, supervisory gates, and fallback policy.</p>
+          <p>State machine routing, timeout/retry policy, cache discipline, evidence gate, and critic validation bound the run.</p>
         </article>
         <article class="card">
-          <h3>Tool Gateway</h3>
-          <p>Timeout, retry, schema validation, and error taxonomy in one deterministic control gate.</p>
-        </article>
-        <article class="card">
-          <h3>Evidence First</h3>
-          <p>Immutable references (<code>E1..En</code>) plus retrieval context (<code>R1..Rn</code>) for audit trail review.</p>
+          <h3>Supervisory Layer</h3>
+          <p>Surveillance readouts, watchlists, vulnerable-node ranking, and intervention narratives translate metrics into action.</p>
         </article>
         <article class="card">
           <h3>Agentic Ops</h3>
-          <p>Scenario Commander, Autonomous Stress Test, Portfolio Co-Pilot, and intervention analysis.</p>
+          <p>Scenario Commander, Autonomous Stress Test, Portfolio Co-Pilot, and audit export all sit behind the same bounded shell.</p>
         </article>
       </div>
     </section>
 
     <section id="flow" class="reveal">
       <div class="section-head">
-        <p class="eyebrow">Control Flow</p>
-        <h2>Deterministic, Bounded, and Auditable by Design</h2>
+        <p class="eyebrow">Operator Flow</p>
+        <h2>What the Live Product Can Do End to End</h2>
       </div>
       <div class="flow-row">
         <div class="flow-step">received</div>
         <div class="flow-arrow">→</div>
-        <div class="flow-step">local_facts</div>
+        <div class="flow-step">surveillance</div>
         <div class="flow-arrow">→</div>
-        <div class="flow-step">analysis</div>
+        <div class="flow-step">outlook</div>
         <div class="flow-arrow">→</div>
-        <div class="flow-step">critic</div>
+        <div class="flow-step">stress_test</div>
         <div class="flow-arrow">→</div>
-        <div class="flow-step">finalize</div>
+        <div class="flow-step">audit</div>
       </div>
 
       <div class="demo-steps">
         <article>
-          <h3>0:00-0:15</h3>
-          <p>Hook with a direct shock question (JPM -40%).</p>
+          <h3>System State</h3>
+          <p>Read current regime, fragility trend, sector pressure, and the most fragile nodes in the network.</p>
         </article>
         <article>
-          <h3>0:15-0:45</h3>
-          <p>Deterministic systemic state and cascade playback: affected nodes, waves, stress.</p>
+          <h3>Outlook</h3>
+          <p>Inspect short-horizon monitoring baselines, watchlist changes, and checkpoint outlooks for aggregate fragility.</p>
         </article>
         <article>
-          <h3>0:45-1:20</h3>
-          <p>Planner -> Architect+Quant -> Advisor -> Critic.</p>
+          <h3>Stress Scenario</h3>
+          <p>Launch a ticker or sector shock, replay contagion waves, and compare models or scenario presets.</p>
         </article>
         <article>
-          <h3>1:20-1:45</h3>
-          <p>Audit trail, supervisory readout, and intervention framing.</p>
+          <h3>Intervention</h3>
+          <p>Test mitigation ideas like connector removal, exposure caps, or firebreak-style sector containment.</p>
         </article>
         <article>
-          <h3>1:45-2:00</h3>
-          <p>Export bundle and close with fallback resilience.</p>
+          <h3>Audit Export</h3>
+          <p>Review evidence, quality signals, and produce a submission-ready bundle with traces and reproducibility metadata.</p>
         </article>
       </div>
     </section>
@@ -172,7 +199,7 @@
     <section id="proof" class="reveal">
       <div class="section-head">
         <p class="eyebrow">Audit Signals</p>
-        <h2>Reliability Checks and Reproducibility Signals</h2>
+        <h2>What Makes the Live App Defensible</h2>
       </div>
       <div class="proof-grid">
         <article>
@@ -180,12 +207,16 @@
           <p><code>65 passed, 1 skipped</code> across contagion, control plane, gateway, evaluation, RAG, reporting, and Azure smoke coverage.</p>
         </article>
         <article>
-          <h3>Smoke Checks</h3>
-          <p><code>make demo-check</code> validates 5 historical crisis scenarios end-to-end.</p>
+          <h3>Outlook Validation</h3>
+          <p>Fixed-origin, walk-forward, and historical stress folds frame outlook as a monitoring baseline, not overclaimed prediction.</p>
+        </article>
+        <article>
+          <h3>Evidence Discipline</h3>
+          <p>Deterministic facts, RAG references, critic gate, and fallback routing are separated and traceable in the audit view.</p>
         </article>
         <article>
           <h3>Submission Bundle</h3>
-          <p><code>make submission-bundle</code> creates zip + manifest metadata for reproducibility.</p>
+          <p><code>make submission-bundle</code> creates zip + manifest metadata for reproducibility and review.</p>
         </article>
       </div>
     </section>
@@ -204,13 +235,13 @@
           <h3>Pitch Doc</h3>
           <p>Problem, novelty, architecture, impact.</p>
         </a>
-        <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel/blob/main/docs/demo_script.md" target="_blank" rel="noreferrer">
-          <h3>Demo Script</h3>
-          <p>2-minute script with fallback plan.</p>
+        <a class="link-card" href="https://github.com/stefano-blando/risk-sentinel/blob/main/docs/demo_voiceover_tts.md" target="_blank" rel="noreferrer">
+          <h3>Voiceover Script</h3>
+          <p>Clean TTS-ready narration for the current product demo.</p>
         </a>
         <a class="link-card" href="https://risk-sentinel-hxq8pzyujwbmbokegefcaq.streamlit.app/" target="_blank" rel="noreferrer">
           <h3>Live Demo URL</h3>
-          <p>Open the public Streamlit application.</p>
+          <p>Open the public Streamlit application with Surveillance, Outlook, Stress Test, and Audit Trail.</p>
         </a>
         <a class="link-card link-placeholder" href="#" aria-disabled="true">
           <h3>Video URL</h3>
