@@ -49,6 +49,10 @@ CRISIS_EVENTS = {
     "Japan Carry Trade 2024": ("2024-08-01", "2024-08-15"),
 }
 
+REGIME_ORDER = ["Calm", "Normal", "Elevated", "High", "Crisis"]
+REGIME_TO_NUMERIC = {name: idx for idx, name in enumerate(REGIME_ORDER)}
+NUMERIC_TO_REGIME = {idx: name for name, idx in REGIME_TO_NUMERIC.items()}
+
 
 def _candidate_processed_dirs() -> list[Path]:
     """Return candidate 'processed' dirs in priority order."""
@@ -141,9 +145,50 @@ def _demo_sector_universe() -> dict[str, list[str]]:
 
 def _classify_regime(vix: pd.Series) -> pd.Series:
     bins = [-np.inf, 16.0, 20.0, 25.0, 32.0, np.inf]
-    labels = ["Calm", "Normal", "Elevated", "High", "Crisis"]
+    labels = REGIME_ORDER
     cat = pd.cut(vix, bins=bins, labels=labels, right=False)
     return cat.astype(str)
+
+
+def _normalize_regime_data(frame: pd.DataFrame) -> pd.DataFrame:
+    normalized = frame.copy()
+
+    if "Regime" not in normalized.columns and "Regime_Numeric" in normalized.columns:
+        numeric = pd.to_numeric(normalized["Regime_Numeric"], errors="coerce")
+        normalized["Regime"] = numeric.round().map(NUMERIC_TO_REGIME)
+
+    if "Regime_Numeric" not in normalized.columns:
+        if "Regime" in normalized.columns:
+            regime_labels = normalized["Regime"].astype(str).str.strip()
+            numeric = regime_labels.map(REGIME_TO_NUMERIC)
+            if numeric.isna().any() and "VIX" in normalized.columns:
+                fallback_numeric = _classify_regime(pd.to_numeric(normalized["VIX"], errors="coerce")).map(REGIME_TO_NUMERIC)
+                numeric = numeric.fillna(fallback_numeric)
+            normalized["Regime_Numeric"] = numeric
+        elif "VIX" in normalized.columns:
+            inferred_regime = _classify_regime(pd.to_numeric(normalized["VIX"], errors="coerce"))
+            normalized["Regime"] = inferred_regime
+            normalized["Regime_Numeric"] = inferred_regime.map(REGIME_TO_NUMERIC)
+
+    if "Regime" in normalized.columns:
+        normalized["Regime"] = normalized["Regime"].astype(str).str.strip()
+    if "Regime_Numeric" in normalized.columns:
+        normalized["Regime_Numeric"] = pd.to_numeric(normalized["Regime_Numeric"], errors="coerce").round()
+        normalized["Regime_Numeric"] = normalized["Regime_Numeric"].fillna(0).astype(int)
+
+    if "Regime" not in normalized.columns and "Regime_Numeric" in normalized.columns:
+        normalized["Regime"] = normalized["Regime_Numeric"].map(NUMERIC_TO_REGIME).fillna("Calm")
+    elif "Regime" in normalized.columns and "Regime_Numeric" in normalized.columns:
+        normalized["Regime"] = normalized["Regime"].replace({"nan": None}).fillna(
+            normalized["Regime_Numeric"].map(NUMERIC_TO_REGIME)
+        )
+
+    if "HighVol" not in normalized.columns and "Regime_Numeric" in normalized.columns:
+        normalized["HighVol"] = normalized["Regime_Numeric"].ge(2).astype(int)
+    if "Crisis" not in normalized.columns and "Regime" in normalized.columns:
+        normalized["Crisis"] = normalized["Regime"].eq("Crisis").astype(int)
+
+    return normalized
 
 
 def _build_synthetic_dataset() -> dict:
@@ -393,7 +438,8 @@ def load_market_data() -> pd.DataFrame:
 
 def load_regime_data() -> pd.DataFrame:
     """VIX + regime labels + CSAD."""
-    return _load_parquet_or_synthetic("regime_data.parquet", "regime_data")
+    frame = _load_parquet_or_synthetic("regime_data.parquet", "regime_data")
+    return _normalize_regime_data(frame)
 
 
 def load_network_metrics() -> pd.DataFrame:

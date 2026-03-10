@@ -95,8 +95,42 @@ def test_load_regime_data() -> None:
     regimes = dl.load_regime_data()
 
     _assert_non_empty_df(regimes)
-    _assert_has_columns(regimes, ["Regime"])
+    _assert_has_columns(regimes, ["Regime", "Regime_Numeric"])
     assert set(regimes["Regime"].dropna().unique()).issubset(REQUIRED_REGIMES)
+
+
+def test_load_regime_data_derives_numeric_from_labels(monkeypatch: pytest.MonkeyPatch) -> None:
+    sample = pd.DataFrame(
+        {
+            "Regime": ["Calm", "Elevated", "Crisis"],
+            "VIX": [14.0, 21.0, 35.0],
+        },
+        index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06"]),
+    )
+
+    monkeypatch.setattr(dl, "_load_parquet_or_synthetic", lambda *_args, **_kwargs: sample.copy())
+
+    regimes = dl.load_regime_data()
+
+    assert regimes["Regime_Numeric"].tolist() == [0, 2, 4]
+    assert regimes["HighVol"].tolist() == [0, 1, 1]
+    assert regimes["Crisis"].tolist() == [0, 0, 1]
+
+
+def test_load_regime_data_derives_labels_from_vix(monkeypatch: pytest.MonkeyPatch) -> None:
+    sample = pd.DataFrame(
+        {
+            "VIX": [12.0, 18.0, 24.0, 29.0, 41.0],
+        },
+        index=pd.to_datetime(["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08"]),
+    )
+
+    monkeypatch.setattr(dl, "_load_parquet_or_synthetic", lambda *_args, **_kwargs: sample.copy())
+
+    regimes = dl.load_regime_data()
+
+    assert regimes["Regime"].tolist() == ["Calm", "Normal", "Elevated", "High", "Crisis"]
+    assert regimes["Regime_Numeric"].tolist() == [0, 1, 2, 3, 4]
 
 
 def test_load_network_metrics() -> None:
