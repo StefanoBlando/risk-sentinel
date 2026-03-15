@@ -2,7 +2,9 @@ RiskSentinel is an agentic platform for systemic risk surveillance, forward stre
 
 It helps answer a central question for supervisors and risk teams: where is systemic fragility building, and what happens if a critical node fails?
 
-Here, the Surveillance view summarizes the current regime, sector pressure, and the most systemically vulnerable nodes.
+Here, we trigger a crisis replay and immediately see how stress propagates across the market graph wave by wave.
+
+Then we move to a supervisory dashboard with affected nodes, cascade depth, total stress, and model-sensitive risk comparisons.
 
 The Outlook layer adds forward-looking monitoring.
 
@@ -18,7 +20,11 @@ This is where RiskSentinel becomes decision-oriented.
 
 We can compare scenarios, inspect vulnerable nodes, and test interventions such as exposure caps, connector removal, or sector firebreaks, before producing a supervisory readout.
 
-Every run remains bounded and auditable.
+For agent-driven analysis, we can enable Azure GPT and run a complex query.
+
+The system coordinates specialist roles, then validates outputs against deterministic evidence through an auditable control flow.
+
+Every run remains bounded and traceable.
 
 The platform separates deterministic evidence from the AI interpretation layer, records execution traces, applies critic validation, and exposes quality signals for review.
 
