@@ -16,6 +16,9 @@ This setup keeps the app public while protecting Azure usage with soft request l
 1. Open app `Settings` -> `Secrets`.
 2. Paste content from `.streamlit/secrets.toml.example`.
 3. Replace placeholders with your real Azure values.
+4. Use your Azure OpenAI resource endpoint in this form:
+   - `https://<resource-name>.openai.azure.com/`
+   - not `https://<resource-name>.api.cognitive.microsoft.com/`
 
 ## 3. Data mode on Cloud
 

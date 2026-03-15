@@ -333,4 +333,7 @@ def get_agent_config_status(get_settings_fn) -> tuple[bool, str]:
     missing = [key for key in required if not str(getattr(settings, key, "")).strip()]
     if missing:
         return False, f"Missing env vars: {', '.join(missing)}"
+    endpoint = str(getattr(settings, "AZURE_OPENAI_ENDPOINT", "")).strip()
+    if ".openai.azure.com" not in endpoint:
+        return False, "AZURE_OPENAI_ENDPOINT must point to your Azure OpenAI resource (*.openai.azure.com)."
     return True, ""

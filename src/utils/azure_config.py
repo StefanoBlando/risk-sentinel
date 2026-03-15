@@ -1,5 +1,6 @@
 """Azure configuration helpers for RiskSentinel."""
 
+from urllib.parse import urlparse
 from typing import Any
 
 Settings = None
@@ -69,7 +70,33 @@ def get_settings():
     load_dotenv()
     settings_cls = _get_settings_class()
     _SETTINGS_CACHE = settings_cls()
+    _SETTINGS_CACHE.AZURE_OPENAI_ENDPOINT = normalize_azure_openai_endpoint(
+        _SETTINGS_CACHE.AZURE_OPENAI_ENDPOINT
+    )
     return _SETTINGS_CACHE
+
+
+def normalize_azure_openai_endpoint(endpoint: str) -> str:
+    """Normalize Azure OpenAI resource endpoints.
+
+    Streamlit secrets were previously documented with the legacy
+    `*.api.cognitive.microsoft.com` host. The Responses clients used by the
+    app expect the Azure OpenAI resource endpoint (`*.openai.azure.com`).
+    """
+    raw = str(endpoint or "").strip()
+    if not raw:
+        return raw
+    parsed = urlparse(raw)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or parsed.path
+    path = parsed.path if parsed.netloc else ""
+    netloc = netloc.strip().rstrip("/")
+    if netloc.endswith(".api.cognitive.microsoft.com"):
+        resource = netloc[: -len(".api.cognitive.microsoft.com")]
+        netloc = f"{resource}.openai.azure.com"
+        path = ""
+    normalized = f"{scheme}://{netloc}{path}".rstrip("/")
+    return normalized + "/"
 
 
 def get_openai_client():
